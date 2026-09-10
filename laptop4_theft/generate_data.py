@@ -1,7 +1,14 @@
 import mysql.connector
 from datetime import date, timedelta
+import os
+from dotenv import load_dotenv
+from faker import Faker
 
-PASSWORD = ""
+load_dotenv()
+
+PASSWORD = os.getenv("MYSQL_ROOT_PASSWORD")
+
+fake = Faker()
 
 cases = [
     ("DL01AB1003", "stolen"),

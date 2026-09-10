@@ -1,7 +1,12 @@
+import os
 import mysql.connector
+from dotenv import load_dotenv
 from faker import Faker
 
-PASSWORD = ""
+load_dotenv()
+
+PASSWORD = os.getenv("MYSQL_ROOT_PASSWORD")
+
 fake = Faker()
 
 PLATES = [f"DL{str(i).zfill(2)}AB{1000+i}" for i in range(1, 41)]
