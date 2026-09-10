@@ -775,3 +775,10 @@ python app.py
 | `DL02AB1002` | Uninsured                  |
 | `DL03AB1003` | Stolen + expired insurance |
 | `DL04AB1004` | Identifier normalization   |
+
+```bash
+python3 import_real_data.py vehicles data/laptop1_vehicle_registration.csv
+python3 import_real_data.py insurance data/laptop2_insurance.csv
+python3 import_real_data.py rto data/laptop3_rto.csv
+python3 import_real_data.py theft data/laptop4_theft_shredding.csv
+```
