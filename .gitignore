@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 *.pkl
 .DS_Store
+.coordinator/ministry_report.csv
