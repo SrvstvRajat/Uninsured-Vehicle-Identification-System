@@ -11,8 +11,20 @@ def load_master(refresh=False):
     if refresh or not os.path.exists(CACHE_FILE):
         master = build_vehicle_master()
         save_master(master)
-        return master
-    return pd.read_pickle(CACHE_FILE)
+    else:
+        master = pd.read_pickle(CACHE_FILE)
+
+    # Index by the normalized plate key so lookups are O(1) hash-based
+    # (master.loc[key]) instead of an O(n) full-table boolean-mask scan
+    # (master[master["key"] == key]) on every single call. With ~100k
+    # vehicles and generate_report.py calling this once per plate, the
+    # old approach meant ~10 billion row comparisons total; this brings
+    # it down to effectively linear time. Keep "key" as a real column
+    # too (drop=False) so existing code that reads row["key"] still works.
+    if master.index.name != "key":
+        master = master.set_index("key", drop=False)
+
+    return master
 
 
 def get_vehicle_status(plate_input, master=None):
@@ -25,16 +37,21 @@ def get_vehicle_status(plate_input, master=None):
 
     master = master if master is not None else load_master()
     key = normalize_plate(plate_input)
-    rows = master[master["key"] == key]
 
-    if rows.empty:
+    if key is None or key not in master.index:
         return {
             "plate": plate_input,
             "found": False,
             "message": "No record found in the integrated vehicle master.",
         }
 
-    row = rows.iloc[0]
+    row = master.loc[key]
+    # Defensive: if duplicate keys ever slip through (shouldn't, given
+    # dedup in integration_engine.py), .loc returns a DataFrame instead
+    # of a Series — fall back to the first match rather than crashing.
+    if isinstance(row, pd.DataFrame):
+        row = row.iloc[0]
+
     flags = []
 
     policy_end = row.get("policy_end_date")
