@@ -166,6 +166,15 @@ FLUSH PRIVILEGES;
 ```
 
 ---
+## Instruction starts from here, virtual venv
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+
+python -m pip install --upgrade pip
+
+pip install -r requirements.txt
+```
 
 ## Part A — Local single-machine run (do this first)
 
