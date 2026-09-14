@@ -1,3 +1,3 @@
 CREATE USER IF NOT EXISTS 'coordinator'@'%' IDENTIFIED BY 'ChooseAStrongPassword123!';
-GRANT SELECT, INSERT, UPDATE ON vehicle_registration_db.* TO 'coordinator'@'%';
+GRANT SELECT ON vehicle_registration_db.* TO 'coordinator'@'%';
 FLUSH PRIVILEGES;
