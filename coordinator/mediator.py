@@ -22,7 +22,7 @@ is fetched when a vehicle is queried.
 
 import re
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional, Tuple
 
 import mysql.connector
 
@@ -56,7 +56,7 @@ SOURCE_QUERIES = {
 }
 
 
-def normalize_plate(raw: Any) -> str | None:
+def normalize_plate(raw: Any) -> Optional[str]:
     """Convert source-specific plate formats to one canonical key."""
     if raw is None:
         return None
@@ -82,7 +82,7 @@ def _normalized_sql(column: str) -> str:
     )
 
 
-def fetch_one(source_name: str, plate_key: str) -> tuple[dict | None, dict]:
+def fetch_one(source_name: str, plate_key: str) -> Tuple[Optional[dict], dict]:
     """
     Query exactly one source for one canonical vehicle key.
 
