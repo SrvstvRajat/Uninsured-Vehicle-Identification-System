@@ -12,7 +12,7 @@ back to the Ministry of Transportation.
 > uninsured_vehicle_project_exact_architecture/     # repo root — run coordinator commands from HERE
 > ├── coordinator/                # engine scripts, run on the Coordinator machine
 > │   ├── config.py
-> │   ├── integration_engine.py
+> │   ├── mediator.py
 > │   ├── query_tool.py
 > │   ├── generate_report.py
 > │   └── app.py
@@ -59,69 +59,129 @@ back to the Ministry of Transportation.
 
 ## 1. Architecture
 
+This project uses a **federated / mediated data-integration architecture**.
+
+The source databases remain independent and autonomous. The Coordinator does **not**
+build or store a permanent integrated master table. Instead, `mediator.py` sends
+queries to the required source databases at **query time**, normalizes the
+vehicle identifier, reconciles the returned records, and produces a decision-ready
+Vehicle 360 view.
+
 ```mermaid
 flowchart TB
     subgraph L1["Laptop 1 — Vehicle Registration"]
         DB1[(vehicle_registration_db<br/>vehicles)]
     end
+
     subgraph L2["Laptop 2 — Insurance"]
         DB2[(insurance_db<br/>insurance_policies)]
     end
+
     subgraph L3["Laptop 3 — RTO"]
         DB3[(rto_db<br/>rto_records)]
     end
+
     subgraph L4["Laptop 4 — Theft & Shredding"]
         DB4[(theft_db<br/>theft_records)]
     end
+
     subgraph L5["Laptop 5 — Ministry of Transportation"]
         DB5[(mot_db<br/>mot_reports)]
     end
 
     subgraph C["Coordinator laptop"]
-        IE[integration_engine.py<br/>normalize + merge]
-        MASTER[(vehicle_master.pkl)]
+        M[mediator.py<br/>query-time federation]
         QT[query_tool.py / app.py]
         GR[generate_report.py]
-        IE --> MASTER --> QT
-        MASTER --> GR
+        M --> QT
+        M --> GR
     end
 
-    DB1 -- SELECT over network --> IE
-    DB2 -- SELECT over network --> IE
-    DB3 -- SELECT over network --> IE
-    DB4 -- SELECT over network --> IE
-    GR -- INSERT over network --> DB5
+    DB1 -- live SELECT --> M
+    DB2 -- live SELECT --> M
+    DB3 -- live SELECT --> M
+    DB4 -- live SELECT --> M
+    GR -- INSERT flagged reports --> DB5
 ```
 
-**Why the sources are "heterogeneous":** each database names the vehicle
-identifier column differently on purpose —
+### Why this is federation / mediation
 
-| Laptop | Database                  | Table                | Identifier column                        |
-| ------ | ------------------------- | -------------------- | ---------------------------------------- |
-| 1      | `vehicle_registration_db` | `vehicles`           | `reg_plate`                              |
-| 2      | `insurance_db`            | `insurance_policies` | `vehicle_number`                         |
-| 3      | `rto_db`                  | `rto_records`        | `car_id`                                 |
-| 4      | `theft_db`                | `theft_records`      | `plate_no`                               |
-| 5      | `mot_db`                  | `mot_reports`        | `vehicle_plate` (write-only, never read) |
+- **Federation:** each source database remains at its own location and autonomous.
+- **Mediation:** `mediator.py` acts as the middle layer between the user/query
+  tools and the heterogeneous source databases.
+- **No `vehicle_master.pkl`:** there is no persistent integrated master dataset.
+- **Integration happens at query time:** a plate lookup causes the Coordinator to
+  query the four source systems live and reconcile their responses.
+- **Ministry reporting is a write-back operation:** flagged vehicles are written
+  to `mot_db.mot_reports`; the MOT database is not used as a source for Vehicle 360
+  lookups.
 
-`normalize_plate()` in `integration_engine.py` strips spaces/dashes and
-uppercases every raw value into one canonical key (`DL01AB1001`), which is
-what every merge and lookup actually joins on.
+### Heterogeneous source schemas
 
-**Decision layer** (`query_tool.py`), run per vehicle after the merge:
+Each source database intentionally uses a different name for the vehicle identifier:
 
-| Priority | Condition                                | Decision                            |
-| -------- | ---------------------------------------- | ----------------------------------- |
-| 1        | `theft.status == 'stolen'`               | `STOLEN`                            |
-| 2        | `theft.status == 'shredded'`             | `SCRAPPED/SHREDDED`                 |
-| 3        | no matching insurance row                | `UNINSURED`                         |
-| 4        | `policy_end_date < today`                | `INSURANCE EXPIRED`                 |
-| 5        | any source was unreachable at build time | `INCONCLUSIVE — SOURCE UNAVAILABLE` |
-| 6        | none of the above                        | `OK — INSURED AND CLEAR`            |
+| Laptop | Database                  | Table                | Identifier column            |
+| ------ | ------------------------- | -------------------- | ---------------------------- |
+| 1      | `vehicle_registration_db` | `vehicles`           | `reg_plate`                  |
+| 2      | `insurance_db`            | `insurance_policies` | `vehicle_number`             |
+| 3      | `rto_db`                  | `rto_records`        | `car_id`                     |
+| 4      | `theft_db`                | `theft_records`      | `plate_no`                   |
+| 5      | `mot_db`                  | `mot_reports`        | `vehicle_plate` (write-only) |
 
-A **trust score** (100, minus 20 per unavailable source, minus 5 if theft-flagged) gives a graded confidence measure alongside the decision.
+`normalize_plate()` strips spaces and dashes and uppercases the raw vehicle number
+into one canonical key such as `DL01AB1001`. The mediator uses this canonical form
+while querying the different source columns.
 
----
+### Query-time Vehicle 360 decision layer
+
+For each requested vehicle, `mediator.py` queries all four source systems and
+combines the available information.
+
+| Priority | Condition                          | Decision                            |
+| -------- | ---------------------------------- | ----------------------------------- |
+| 1        | `theft.status == 'stolen'`         | `STOLEN`                            |
+| 2        | `theft.status == 'shredded'`       | `SCRAPPED/SHREDDED`                 |
+| 3        | no matching insurance policy       | `UNINSURED`                         |
+| 4        | `policy_end_date < today`          | `INSURANCE EXPIRED`                 |
+| 5        | required source is unavailable     | `INCONCLUSIVE — SOURCE UNAVAILABLE` |
+| 6        | RTO-only / source mismatch anomaly | `DATA QUALITY ANOMALY`              |
+| 7        | none of the above                  | `OK — INSURED AND CLEAR`            |
+
+A **trust score** starts at 100, subtracts 20 for each unavailable source,
+5 when theft/shredding information flags the vehicle, and 15 for an RTO-only
+anomaly. The score is clamped to 0–100.
+
+### Core flow
+
+```text
+User enters vehicle plate
+        |
+        v
+   mediator.py
+        |
+        +----> Vehicle Registration DB
+        |
+        +----> Insurance DB
+        |
+        +----> RTO DB
+        |
+        +----> Theft/Shredding DB
+        |
+        v
+Normalize + reconcile source responses
+        |
+        v
+Vehicle 360 + decision + trust score
+        |
+        +----> query_tool.py
+        |
+        +----> app.py
+        |
+        +----> generate_report.py
+                       |
+                       v
+                 MOT database
+```
 
 ## 2. Prerequisites
 
@@ -154,7 +214,7 @@ COORDINATOR_PASSWORD=ChooseAStrongPassword123!
 MYSQL_ROOT_PASSWORD=studentroot
 ```
 
-- `COORDINATOR_*` — used by `config.py`, `integration_engine.py`, `generate_report.py`, `app.py` to connect as the low-privilege `coordinator` user.
+- `COORDINATOR_*` — used by `config.py`, `mediator.py`, `generate_report.py`, `app.py` to connect as the low-privilege `coordinator` user.
 - `MYSQL_ROOT_PASSWORD` — used only by `generate_data.py` / `import_real_data.py`, which need root to seed/replace data directly.
 - All `_HOST` values start as `localhost` (Part A). They become real LAN IPs in Part B.
 
@@ -166,7 +226,9 @@ FLUSH PRIVILEGES;
 ```
 
 ---
+
 ## Instruction starts from here, virtual venv
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -215,30 +277,62 @@ python3 import_real_data.py theft     data/laptop4_theft_shredding.csv
 
 This truncates each table first, so real data fully replaces dummy rows. Never run anything against `mot_db` here — it must start and stay empty.
 
-### A4 — Build the integrated master
+### A4 — Run the federated mediator
 
 ```bash
 cd coordinator
-python3 integration_engine.py
+python3 mediator.py
 ```
 
-Pulls all 4 sources over the network, normalizes plate formats, merges, and saves `vehicle_master.pkl` (inside `coordinator/`). Should print a row count and all 4 sources as AVAILABLE. `.env` at the repo root is found automatically even though you're now a folder deeper.
+Enter a vehicle plate when prompted.
 
-### A5 — Query it
+The mediator queries the four source databases **live**, normalizes the plate
+identifier, reconciles the responses, and prints the Vehicle 360 profile,
+source availability, decision, trust score, and federation mode.
+
+**Important:** this step does **not** create `vehicle_master.pkl` and does not
+copy all source data into a master database/file.
+
+### A5 — Query a vehicle
 
 ```bash
-python3 query_tool.py     # still inside coordinator/
+python3 query_tool.py
 ```
 
-Enter a plate number, `refresh` (rebuild fresh), or `quit`.
+Try examples such as:
+
+```text
+DL01AB1003
+DL01AB1008
+DL01AB1015
+DL01AB1025
+DL01AB1004
+```
+
+Also test identifier-format normalization:
+
+```text
+DL01AB1004
+DL 01 AB 1004
+DL-01-AB-1004
+```
+
+Each request is resolved against the source databases at query time.
 
 Optional web UI:
 
 ```bash
-python3 app.py             # still inside coordinator/
+python3 app.py
 ```
 
-then visit `http://localhost:5000`.
+Then visit:
+
+```text
+http://localhost:5001
+```
+
+The UI displays the Vehicle 360 profile, decision, trust score, flags, source
+availability, and the federated query mode.
 
 ### A6 — Generate the compliance report
 
@@ -305,27 +399,27 @@ Put every laptop on the same Wi-Fi/hotspot first — a phone hotspot is the most
    mysql -h LAPTOP5_IP -u coordinator -p mot_db -e "SHOW TABLES;"
    ```
 
-   Fix any failures here (back to B2) before running anything in Python — `integration_engine.py`'s error handling will otherwise mask which laptop is actually the problem.
+   Fix any failures here (back to B2) before running anything in Python — `mediator.py`'s error handling will otherwise mask which laptop is actually the problem.
 
 3. **Run the exact same commands as Part A4–A6**, now pointed at real IPs — no code changes needed, since `config.py` reads everything from `.env`.
 
 ### B4 — Test the failure mode
 
-Kill the Wi-Fi on one DB laptop, then re-run `python3 query_tool.py`. Affected vehicles should show `*_source_available: False` and roll into `INCONCLUSIVE — SOURCE UNAVAILABLE`, not crash the program. This is End-to-End Test #6 from the project guide and proves the system degrades gracefully.
+Stop MySQL or disconnect one DB laptop, then re-run `python3 query_tool.py`. The affected source should show as unavailable and the result should roll into `INCONCLUSIVE — SOURCE UNAVAILABLE` where the missing source prevents a reliable decision, rather than crashing the program. This is End-to-End Test #6 from the project guide and proves the system degrades gracefully.
 
 ---
 
 ## Troubleshooting
 
-| Symptom                                      | Likely cause                                                            | Fix                                                                                                       |
-| -------------------------------------------- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `Access denied for user 'root'@'localhost'`  | `.env` password doesn't match MySQL's actual root password              | `mysql -u root -p`, or `mysql -u root` if blank; then `ALTER USER 'root'@'localhost' IDENTIFIED BY '...'` |
-| `Access denied for user 'coordinator'@'IP'`  | `coordinator_user.sql` wasn't run on that laptop, or password mismatch  | Re-run `coordinator_user.sql` on that laptop with the exact password from `.env`                          |
-| `Can't connect to MySQL server on 'IP'`      | Firewall blocking 3306, or `bind-address` still `127.0.0.1`             | Recheck B2 steps 1 and 4 on that laptop                                                                   |
-| `KeyError: 'key'` in `integration_engine.py` | A down source returned a columnless empty DataFrame that couldn't merge | Use the current fixed version, which checks for the source column instead of `.empty`                     |
-| Query tool returns 0 rows for one laptop     | DB/table name typo in `.env` or `schema.sql`                            | Double-check spelling against the `CREATE DATABASE`/`CREATE TABLE` statements                             |
-| Same vehicle appears twice after merge       | Plate format not caught by `normalize_plate()`                          | Print the raw values and extend the regex in `normalize_plate()`                                          |
-| Flask page won't load from another laptop    | `app.run()` bound to `127.0.0.1`                                        | Confirm `host="0.0.0.0"` in `app.py`, and firewall allows port 5000                                       |
+| Symptom                                              | Likely cause                                                            | Fix                                                                                                       |
+| ---------------------------------------------------- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `Access denied for user 'root'@'localhost'`          | `.env` password doesn't match MySQL's actual root password              | `mysql -u root -p`, or `mysql -u root` if blank; then `ALTER USER 'root'@'localhost' IDENTIFIED BY '...'` |
+| `Access denied for user 'coordinator'@'IP'`          | `coordinator_user.sql` wasn't run on that laptop, or password mismatch  | Re-run `coordinator_user.sql` on that laptop with the exact password from `.env`                          |
+| `Can't connect to MySQL server on 'IP'`              | Firewall blocking 3306, or `bind-address` still `127.0.0.1`             | Recheck B2 steps 1 and 4 on that laptop                                                                   |
+| `KeyError: 'key'` in `mediator.py`                   | A down source returned a columnless empty DataFrame that couldn't merge | Use the current fixed version, which checks for the source column instead of `.empty`                     |
+| Query tool returns 0 rows for one laptop             | DB/table name typo in `.env` or `schema.sql`                            | Double-check spelling against the `CREATE DATABASE`/`CREATE TABLE` statements                             |
+| Vehicle not found despite different plate formatting | Spaces/dashes or case differ between systems                            | Check `normalize_plate()` and test `DL01AB1004`, `DL 01 AB 1004`, and `DL-01-AB-1004`                     |
+| Flask page won't load from another laptop            | `app.run()` bound to `127.0.0.1`                                        | Confirm `host="0.0.0.0"` in `app.py`, and firewall allows port 5000                                       |
 
 ---
 
@@ -336,12 +430,38 @@ Kill the Wi-Fi on one DB laptop, then re-run `python3 query_tool.py`. Affected v
 # one-time per source DB
 mysql -u root -p < <laptopN_folder>/schema.sql
 mysql -u root -p < <laptopN_folder>/coordinator_user.sql
-python3 <laptopN_folder>/generate_data.py           # dummy data, OR:
-python3 import_real_data.py <source> data/<csv>     # real data
+
+# dummy data, OR:
+python3 <laptopN_folder>/generate_data.py
+
+# real data:
+python3 import_real_data.py <source> data/<csv>
 
 # --- from inside coordinator/ ---
-python3 integration_engine.py    # whenever underlying data changes
+python3 mediator.py
 python3 query_tool.py
 python3 app.py
 python3 generate_report.py
 ```
+
+### Federated architecture checklist
+
+- [ ] Four source databases remain independent.
+- [ ] Coordinator connects to sources using the configured host/IP values.
+- [ ] `mediator.py` performs live query-time integration.
+- [ ] No `vehicle_master.pkl` is created or required.
+- [ ] `integration_engine.py` is removed and must not be run.
+- [ ] `query_tool.py` calls the mediator directly.
+- [ ] `app.py` calls the mediator directly.
+- [ ] `generate_report.py` uses federated lookups before writing flagged vehicles to MOT.
+- [ ] Part A works on one machine before moving to Part B.
+- [ ] Part B works across the five laptops.
+
+### Viva statement
+
+> **"Our system follows a federated/mediated data-integration architecture.
+> The four authoritative source databases remain autonomous. The Coordinator
+> does not materialize a master dataset; instead, the mediator queries the
+> heterogeneous sources at runtime, normalizes their vehicle identifiers,
+> reconciles the responses, and produces a decision-centric Vehicle 360 view.
+> Flagged vehicles are then reported to the Ministry of Transportation."**
