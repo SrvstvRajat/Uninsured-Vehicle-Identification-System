@@ -8,5 +8,6 @@ CREATE TABLE IF NOT EXISTS insurance_policies (
     policy_no VARCHAR(30),
     policy_start_date DATE,
     policy_end_date DATE,
-    premium_amount DECIMAL(10,2)
+    premium_amount DECIMAL(10,2),
+    INDEX idx_vehicle_number (vehicle_number)
 );

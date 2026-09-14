@@ -6,5 +6,6 @@ CREATE TABLE IF NOT EXISTS rto_records (
     car_id VARCHAR(20) NOT NULL,
     registration_date DATE,
     renewal_date DATE,
-    rto_office VARCHAR(60)
+    rto_office VARCHAR(60),
+    INDEX idx_car_id (car_id)
 );

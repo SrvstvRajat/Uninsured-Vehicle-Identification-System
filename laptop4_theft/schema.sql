@@ -6,5 +6,6 @@ CREATE TABLE IF NOT EXISTS theft_records (
     plate_no VARCHAR(20) NOT NULL,
     theft_date DATE,
     status ENUM('stolen','recovered','shredded') DEFAULT 'stolen',
-    shredded_date DATE NULL
+    shredded_date DATE NULL,
+    INDEX idx_plate_no (plate_no)
 );
