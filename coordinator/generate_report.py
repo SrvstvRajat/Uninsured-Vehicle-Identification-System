@@ -1,18 +1,18 @@
-# """
-# Generate a Ministry of Transport report using federated queries.
+"""
+Generate a Ministry of Transport report using federated queries.
 
-# No vehicle_master.pkl is used. Candidate vehicle identifiers are collected
-# from the independent source systems, and every candidate is evaluated by the
-# mediator at runtime.
-# """
+No vehicle_master.pkl is used. Candidate vehicle identifiers are collected
+from the independent source systems, and every candidate is evaluated by the
+mediator at runtime.
+"""
 
 import csv
 from datetime import date
 
 import mysql.connector
 
-# from config import DB_CONFIGS
-# from mediator import list_candidate_plates, query_vehicle
+from config import DB_CONFIGS
+from mediator import list_candidate_plates, query_vehicle
 
 
 OUTPUT_CSV = "ministry_report.csv"
@@ -50,7 +50,9 @@ def generate_ministry_report() -> None:
     conn = None
     cursor = None
 
-#             print(f"{flag_count} flags written to {OUTPUT_CSV}")
+    try:
+        conn = mysql.connector.connect(**DB_CONFIGS["mot"])
+        cursor = conn.cursor()
 
         with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as csv_file:
             writer = csv.DictWriter(csv_file, fieldnames=OUTPUT_COLUMNS)
@@ -92,19 +94,3 @@ def generate_ministry_report() -> None:
 
 if __name__ == "__main__":
     generate_ministry_report()
-
-
-# ---------------------------------------------------------------------
-# Scheduling — run this automatically instead of by hand
-# ---------------------------------------------------------------------
-#
-# Mac/Linux (cron), e.g. daily at 2 AM:
-#   crontab -e
-#   0 2 * * * cd /path/to/project && /usr/bin/python3 generate_report.py >> mot_batch.log 2>&1
-#
-# Windows (Task Scheduler):
-#   Create Task -> Trigger: Daily, 2:00 AM
-#   Action: Start a program
-#     Program: python.exe
-#     Arguments: generate_report.py
-#     Start in: C:\path\to\project
