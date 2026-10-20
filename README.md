@@ -465,3 +465,13 @@ python3 generate_report.py
 > heterogeneous sources at runtime, normalizes their vehicle identifiers,
 > reconciles the responses, and produces a decision-centric Vehicle 360 view.
 > Flagged vehicles are then reported to the Ministry of Transportation."**
+
+```bash
+INSERT INTO theft_records (plate_no, theft_date, status, shredded_date) VALUES
+('DL01AB1090', CURDATE() - INTERVAL 45 DAY, 'stolen', NULL),
+('DL01AB1091', CURDATE() - INTERVAL 90 DAY, 'recovered', NULL),
+('DL01AB1092', CURDATE() - INTERVAL 150 DAY, 'shredded', CURDATE() - INTERVAL 15 DAY);
+
+
+SELECT * FROM theft_records WHERE plate_no = 'DL01AB1099';
+```
