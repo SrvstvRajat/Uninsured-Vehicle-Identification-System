@@ -4,3 +4,4 @@ faker>=25.0
 flask>=3.0
 tabulate>=0.9
 python-dotenv
+sqlglot>=25.0

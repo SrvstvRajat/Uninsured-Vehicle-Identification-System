@@ -620,8 +620,10 @@ from flask import Flask, request, render_template_string
 
 from mediator import query_vehicle
 from reporting import report_flags
+from sql_console import sql_bp          # <-- NEW: federated SQL console
 
 app = Flask(__name__)
+app.register_blueprint(sql_bp)          # <-- NEW: adds /sql and /sql/run
 
 TEMPLATE = """
 <!doctype html>
@@ -796,6 +798,12 @@ TEMPLATE = """
             Mediation / Federated Virtual Integration — live query across
             independent vehicle, insurance, RTO and theft databases.
         </div>
+
+        <a href="/sql" style="display:block; text-align:center; margin-bottom:18px;
+           padding:12px; background:#e8eef7; color:#1e3a5f; border-radius:8px;
+           font-weight:600; text-decoration:none;">
+            &#128269; Open Federated SQL Console &rarr;
+        </a>
 
         <form method="get">
             <input name="plate" placeholder="Enter vehicle plate"

@@ -1,3 +1,3 @@
 CREATE USER IF NOT EXISTS 'coordinator'@'%' IDENTIFIED BY 'ChooseAStrongPassword123!';
-GRANT INSERT ON mot_db.* TO 'coordinator'@'%';
+GRANT SELECT,UPDATE,INSERT,DELETE ON mot_db.* TO 'coordinator'@'%';
 FLUSH PRIVILEGES;
