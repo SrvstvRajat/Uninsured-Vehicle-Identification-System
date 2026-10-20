@@ -1,3 +1,14 @@
+# # from flask import Flask, request, render_template_string
+
+# # from mediator import query_vehicle
+
+# # app = Flask(__name__)
+
+# Minimum similarity score required before a fuzzy match can be auto-selected.
+FUZZY_MIN_SCORE = 0.60
+FUZZY_MIN_MARGIN = 0.07
+FUZZY_TOP_K = 5
+
 from flask import Flask, request, render_template_string, redirect, url_for
 from werkzeug.utils import secure_filename
 
