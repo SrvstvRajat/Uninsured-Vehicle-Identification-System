@@ -67,3 +67,19 @@ SOURCE_NAMES = {
     "rto": "RTO / Registration Authority",
     "theft": "Theft & Shredding",
 }
+
+SOURCE_API_URLS = {
+    "vehicles": os.getenv("VEHICLES_API_URL", "").rstrip("/"),
+    "insurance": os.getenv("INSURANCE_API_URL", "").rstrip("/"),
+    "rto": os.getenv("RTO_API_URL", "").rstrip("/"),
+    "theft": os.getenv("THEFT_API_URL", "").rstrip("/"),
+    "mot": os.getenv("MOT_API_URL", "").rstrip("/"),
+}
+
+SOURCE_API_TOKENS = {
+    "vehicles": os.getenv("VEHICLES_API_TOKEN", ""),
+    "insurance": os.getenv("INSURANCE_API_TOKEN", ""),
+    "rto": os.getenv("RTO_API_TOKEN", ""),
+    "theft": os.getenv("THEFT_API_TOKEN", ""),
+    "mot": os.getenv("MOT_API_TOKEN", ""),
+}
