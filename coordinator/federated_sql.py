@@ -1,4 +1,3 @@
-
 """
 Federated SQL engine for the Coordinator.
 
@@ -10,7 +9,9 @@ This module:
   2. DECOMPOSES it: finds which table lives in which source database
   3. PUSHES DOWN projections + single-table WHERE filters, so each source
      DB only sends the columns/rows that are needed
-  4. FETCHES from every source database in parallel, live, at query time
+  4. FETCHES from every source in parallel, live, at query time, by sending
+     each sub-query to that source laptop's REST API (source_api/source_api.py).
+     The Coordinator holds no MySQL connection to any other laptop.
   5. INTEGRATES: joins / aggregates / sub-queries / UNIONs / window
      functions run in a throw-away in-memory engine over the fetched
      fragments (nothing is stored; it is discarded after every query)
@@ -21,11 +22,15 @@ No vehicle_master table is built, so the architecture stays
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import socket
 import sqlite3
 import sys
 import time
+import urllib.error
+import urllib.request
 from collections import Counter
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -34,11 +39,10 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Callable, Optional
 
-import mysql.connector
 import sqlglot
 from sqlglot import exp
 
-from config import DB_CONFIGS
+from config import SOURCE_API_TOKENS, SOURCE_API_URLS
 
 # fuzzy_match.py (OCR-aware plate matcher) lives next to this file, or in the
 # project root. Both locations are tried.
@@ -56,6 +60,8 @@ except ImportError:
 # --------------------------------------------------------------------------
 # Settings
 # --------------------------------------------------------------------------
+# How long to wait for a source REST API to answer (seconds)
+API_TIMEOUT_SEC = int(os.getenv("SOURCE_API_TIMEOUT_SEC", "30"))
 MAX_FETCH_ROWS = int(os.getenv("SQL_CONSOLE_MAX_FETCH_ROWS", "200000"))
 MAX_DISPLAY_ROWS = int(os.getenv("SQL_CONSOLE_MAX_DISPLAY_ROWS", "1000"))
 INTEGRATION_TIMEOUT_SEC = int(os.getenv("SQL_CONSOLE_TIMEOUT_SEC", "20"))
@@ -584,18 +590,50 @@ def _build_fragments(tree: exp.Expression, refs: list[exp.Table]) -> dict[str, d
 # --------------------------------------------------------------------------
 # Live fetch from one source database
 # --------------------------------------------------------------------------
-def _mysql_fetch(source: str, sql: str) -> tuple[list[str], list[tuple]]:
-    conn = mysql.connector.connect(**DB_CONFIGS[source])
+# LAN calls to the source laptops must not go through a system HTTP proxy.
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _endpoint(source: str, path: str = "/api/query") -> str:
+    base = SOURCE_API_URLS.get(source, "")
+    return f"{base}{path}" if base else ""
+
+
+def _api_call(source: str, path: str, payload: dict) -> dict:
+    """POST a JSON payload to one source laptop's REST API and return its JSON."""
+    base = SOURCE_API_URLS.get(source, "")
+    if not base:
+        raise RuntimeError(
+            f"No REST API URL configured for '{source}'. Set {source.upper()}_API_URL "
+            "in .env, e.g. http://<that-laptop-ip>:5100")
+    headers = {"Content-Type": "application/json"}
+    token = SOURCE_API_TOKENS.get(source, "")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(base + path, data=json.dumps(payload).encode("utf-8"),
+                                 headers=headers, method="POST")
     try:
-        cur = conn.cursor()
-        cur.execute(sql)
-        cols = list(cur.column_names)
-        rows = cur.fetchall()
-        cur.close()
-        return cols, rows
-    finally:
-        if conn.is_connected():
-            conn.close()
+        with _OPENER.open(req, timeout=API_TIMEOUT_SEC) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.loads(exc.read().decode("utf-8")).get("error")
+        except Exception:
+            detail = None
+        raise RuntimeError(f"{source} REST API answered HTTP {exc.code}: "
+                           f"{detail or exc.reason}")
+    except (socket.timeout, TimeoutError):
+        raise RuntimeError(f"The {source} REST API at {base} did not answer within "
+                           f"{API_TIMEOUT_SEC}s")
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Cannot reach the {source} REST API at {base} ({exc.reason}). "
+                           "Is source_api.py running on that laptop?")
+
+
+def _api_fetch(source: str, sql: str) -> tuple[list[str], list[tuple]]:
+    """Run one sub-query on a source via its REST API; same contract as the old DB fetch."""
+    data = _api_call(source, "/api/query", {"sql": sql})
+    return data["columns"], [tuple(r) for r in data["rows"]]
 
 
 def _fetch_fragment(frag: dict, fetcher: Callable) -> dict:
@@ -665,6 +703,7 @@ def _plan_view(original: str, final_sql: Optional[str], frags: dict,
             {
                 "table": f["table"], "source": f["source"],
                 "database": f["database"], "sql": f["sql"],
+                "endpoint": _endpoint(f["source"]),
                 "columns": f["columns"], "pushed_filters": f["pushed_filters"],
                 "status": f.get("status", "planned"),
                 "error": f.get("error"),
@@ -701,7 +740,7 @@ def run_federated(sql: str, explain_only: bool = False,
     `fetcher` is injectable so the engine can be unit-tested without MySQL.
     """
     t_start = time.perf_counter()
-    fetcher = fetcher or _mysql_fetch
+    fetcher = fetcher or _api_fetch
     try:
         meta = _meta_command(sql)
         if meta:
@@ -828,44 +867,28 @@ def _run_write(tree: exp.Expression, original: str, fetcher: Callable) -> dict:
             ".env to route INSERT/UPDATE/DELETE to the owning source database.")
     sql = _strip_db_qualifiers(tree).sql(dialect="mysql")
     t0 = time.perf_counter()
-    conn = None
     try:
-        conn = mysql.connector.connect(**DB_CONFIGS[spec["source"]])
-        cur = conn.cursor()
-        cur.execute(sql)
-        conn.commit()
-        affected = cur.rowcount
-        cur.close()
+        result = _api_call(spec["source"], "/api/execute", {"sql": sql})
+        affected = result.get("rows_affected", 0)
     except Exception as exc:
         hint = ""
         if "denied" in str(exc).lower():
             verb = sql.split(None, 1)[0].upper()
-            # MySQL reports the connecting user@host. That is usually the account to
-            # grant to, but not always (the account that actually matched can be
-            # 'coordinator'@'%' or 'coordinator'@'localhost'), so also give the
-            # check that settles it.
             m = re.search(r"user '([^']+)'@'([^']+)'", str(exc))
             acct = f"'{m.group(1)}'@'{m.group(2)}'" if m else "'coordinator'@'%'"
-            hint = (f"\n\nThe coordinator connected as {acct} and that account has no "
-                    f"{verb} right on {spec['database']}.{name}. "
-                    f"On the {spec['source']} MySQL server run:\n"
+            hint = (f"\n\nThe {spec['source']} REST API connected to its MySQL as {acct} "
+                    f"and that account has no {verb} right on {spec['database']}.{name}. "
+                    f"On the {spec['source']} laptop run:\n"
                     f"GRANT {verb} ON {spec['database']}.{name} TO {acct}; "
-                    f"FLUSH PRIVILEGES;\n"
-                    f"If it still fails, run SELECT CURRENT_USER(); and SHOW GRANTS; "
-                    f"as the coordinator user to see which account matched and what "
-                    f"it may do.")
+                    f"FLUSH PRIVILEGES;")
         raise QueryError(f"{spec['source']} ({spec['database']}) rejected the "
                          f"statement: {exc}{hint}")
-    finally:
-        if conn is not None and conn.is_connected():
-            conn.close()
     ms = round((time.perf_counter() - t0) * 1000, 1)
     plan = {"original_sql": original, "integration_sql": None, "subqueries": [{
         "table": name, "source": spec["source"], "database": spec["database"],
+        "endpoint": _endpoint(spec["source"], "/api/execute"),
         "sql": sql, "columns": [], "pushed_filters": [], "status": "ok",
         "error": None, "rows_fetched": affected, "ms": ms, "truncated": False}]}
     return {"ok": True, "kind": "write", "columns": ["rows_affected"],
             "rows": [[affected]], "row_count": 1, "truncated": False,
             "warnings": [], "plan": plan}
-
-
