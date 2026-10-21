@@ -12,8 +12,13 @@ FUZZY_TOP_K = 5
 from flask import Flask, request, render_template_string, redirect, url_for
 from werkzeug.utils import secure_filename
 
-from mediator import query_vehicle, list_candidate_plates, normalize_plate
+import time
+
+from mediator import (query_vehicle, list_candidate_plates, normalize_plate,
+                      list_vehicle_profiles)
 from fuzzy_match import plate_similarity
+from detail_match import (rank_with_details, decide, DETAIL_FIELDS,
+                          SECTIONS, DETAIL_LABELS)
 from plate_ocr import (recognize_plate_image, MAX_IMAGE_BYTES,
                        PlateOCRInputError, PlateOCREngineError)
 from reporting import report_flags
@@ -181,7 +186,53 @@ TEMPLATE = """
         }
         .available { color: #1e8449; }
         .unavailable { color: #c0392b; }
+        .search-form { display: block; margin: 24px 0; }
+        .search-form .row { display: flex; gap: 10px; }
+        .detail-box { margin-top: 12px; }
+        .detail-box summary {
+            cursor: pointer; color: #1e3a5f; font-weight: 600; font-size: 0.9rem;
+        }
+        .src-grid {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+            margin-top: 12px;
+        }
+        .src-card {
+            border: 1px solid #d9e2ef; border-radius: 10px; margin: 0;
+            padding: 8px 12px 12px; background: #fafcff; min-width: 0;
+        }
+        .src-card legend {
+            font-weight: 700; font-size: 0.82rem; color: #1e3a5f;
+            padding: 0 6px;
+        }
+        .src-vehicles  { border-left: 4px solid #4a6fa5; }
+        .src-insurance { border-left: 4px solid #2e9e6b; }
+        .src-rto       { border-left: 4px solid #d9962b; }
+        .src-theft     { border-left: 4px solid #c0392b; }
+        .src-card label {
+            display: block; font-size: 0.72rem; color: #667085;
+            margin-top: 8px; text-transform: uppercase; letter-spacing: .04em;
+        }
+        .src-card input {
+            width: 100%; margin-top: 3px; padding: 9px 10px; font-size: 0.9rem;
+        }
+        .clear-btn {
+            background: #e8eef7; color: #1e3a5f; padding: 8px 14px;
+            font-size: 0.82rem; margin-top: 12px;
+        }
+        .hint { color: #667085; font-size: 0.78rem; margin-top: 6px; }
+        .cand-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 8px; }
+        .cand-table th, .cand-table td {
+            text-align: left; padding: 6px 8px; border-bottom: 1px solid #e3e8ef;
+            vertical-align: top;
+        }
+        .chip { display: inline-block; padding: 2px 8px; border-radius: 12px;
+                font-size: 0.74rem; margin: 1px 3px 1px 0; }
+        .chip.match { background: #eafaf0; color: #1e8449; }
+        .chip.partial { background: #fff8e1; color: #8a6d1c; }
+        .chip.mismatch { background: #fdecea; color: #a33; }
+        .identified { background: #eafaf0; border-color: #b7e4c7; color: #1e5631; }
         @media (max-width: 640px) {
+            .src-grid { grid-template-columns: 1fr; }
             .card { padding: 24px 18px; }
             form { flex-direction: column; }
             button { width: 100%; }
@@ -204,16 +255,49 @@ TEMPLATE = """
             &#128269; Open Federated SQL Console &rarr;
         </a>
 
-        <form method="get">
-            <input name="plate" placeholder="Enter vehicle plate"
-                   value="{{ plate or '' }}" autofocus>
-            <button type="submit">Search</button>
+        <form method="get" action="/" class="search-form">
+            <div class="row">
+                <input name="plate" placeholder="Enter vehicle plate (full, partial or unclear, e.g. DL0?AB10?7)"
+                       value="{{ plate or '' }}" autofocus>
+                <button type="submit">Search</button>
+            </div>
+            <details class="detail-box" {% if details %}open{% endif %}>
+                <summary>Plate unclear? Add details from any of the four databases</summary>
+                <div class="src-grid">
+                {% for sec in sections %}
+                    <fieldset class="src-card src-{{ sec.key }}">
+                        <legend>{{ sec.icon }} {{ sec.title }}</legend>
+                        {% for field, label in sec.fields %}
+                            <label for="f_{{ field }}">{{ label }}</label>
+                            <input id="f_{{ field }}" name="{{ field }}"
+                                   {% if field_options.get(field) %}list="dl_{{ field }}"{% endif %}
+                                   placeholder="{{ 'Pick or type' if field_options.get(field) else 'Type to enter' }}"
+                                   value="{{ (details or {}).get(field, '') }}" autocomplete="off">
+                            {% if field_options.get(field) %}
+                                <datalist id="dl_{{ field }}">
+                                    {% for opt in field_options[field] %}<option value="{{ opt }}">{% endfor %}
+                                </datalist>
+                            {% endif %}
+                        {% endfor %}
+                    </fieldset>
+                {% endfor %}
+                </div>
+                <div class="hint">Use "?" for plate characters you cannot read. Click a field to pick from the
+                    values found in that database, or just type your own. Leave blank anything you don't know &mdash;
+                    the plate and all filled fields are combined to find the one registration that agrees with them.</div>
+                <button type="button" class="clear-btn"
+                    onclick="document.querySelectorAll('.src-card input').forEach(function(i){i.value='';})">Clear details</button>
+            </details>
         </form>
 
-        <form method="post" action="/scan" enctype="multipart/form-data">
-            <input type="file" name="plate_image"
-                   accept="image/jpeg,image/png,image/heic" required>
-            <button type="submit">Read plate with OCR</button>
+        <form method="post" action="/scan" enctype="multipart/form-data" class="search-form">
+            <div class="row">
+                <input type="file" name="plate_image"
+                       accept="image/jpeg,image/png,image/heic" required>
+                <button type="submit">Read plate with OCR</button>
+            </div>
+            <div class="hint">After the plate is read, add details from the four databases
+                in the search box above to confirm the exact vehicle.</div>
         </form>
 
         {% if ocr_candidates %}
@@ -229,19 +313,41 @@ TEMPLATE = """
             </div>
         {% endif %}
 
+        {% if identified_by %}
+            <div class="reported-note identified">
+                <strong>Vehicle identified: {{ plate_resolved }}</strong>
+                — matched on {{ identified_by }}.
+                Review the evidence below before acting on it.
+            </div>
+        {% endif %}
+
         {% if fuzzy_candidates %}
             <div class="reported-note warn">
-                <strong>Fuzzy plate candidates (suggestions, not proof of identity):</strong>
-                <ul>
+                <strong>Candidate registrations (suggestions, not proof of identity):</strong>
+                <table class="cand-table">
+                    <tr><th>Plate</th><th>Score</th>{% if details %}<th>Details vs. registry</th>{% endif %}<th></th></tr>
                 {% for item in fuzzy_candidates %}
-                    <li>
-                        <strong>{{ item.plate }}</strong> — similarity {{ '%.1f'|format(item.score * 100) }}%
-                        <a href="/?plate={{ item.plate|urlencode }}&confirmed=1">Open this vehicle</a>
-                    </li>
+                    <tr>
+                        <td><strong>{{ item.plate }}</strong></td>
+                        <td>{{ '%.1f'|format(item.score * 100) }}%</td>
+                        {% if details %}
+                        <td>
+                            {% for field, v in (item.fields or {}).items() %}
+                                <span class="chip {{ v.status }}">
+                                    {{ field_labels.get(field, field) }}:
+                                    {{ v.stored or '—' }}
+                                    {% if v.status == 'match' %}✓{% elif v.status == 'mismatch' %}✗{% else %}~{% endif %}
+                                </span>
+                            {% endfor %}
+                        </td>
+                        {% endif %}
+                        <td><a href="/?plate={{ item.plate|urlencode }}&confirmed=1">Open this vehicle</a></td>
+                    </tr>
                 {% endfor %}
-                </ul>
+                </table>
                 {% if fuzzy_best and not fuzzy_auto %}
-                    <p>No candidate passed both the similarity and ambiguity checks. Please verify the plate manually.</p>
+                    <p>{{ decision_reason or 'No candidate passed both the similarity and ambiguity checks.' }}
+                       Please verify manually{% if details %} or add another detail{% endif %}.</p>
                 {% endif %}
             </div>
         {% endif %}
@@ -250,7 +356,7 @@ TEMPLATE = """
             <div class="error">{{ error_message }}</div>
         {% endif %}
 
-        {% if plate %}
+        {% if plate or details %}
             {% if match_score is not none %}
                 <p class="reported-note">Selected registration similarity: {{ '%.1f'|format(match_score * 100) }}%.</p>
             {% endif %}
@@ -421,6 +527,84 @@ def _fuzzy_decision(candidates):
     return candidates[0]["plate"], safe
 
 
+_OPTIONS_TTL = 300
+_options_cache = {"at": 0.0, "data": {}}
+STATIC_OPTIONS = {
+    "policy_status": ["Active", "Expired", "No policy"],
+    "renewal_status": ["Valid", "Lapsed", "No RTO record"],
+    "theft_status": ["Stolen", "Recovered", "Shredded", "No theft record"],
+}
+OPTION_FIELDS = ("make", "model", "color", "insurer_name", "rto_office",
+                 "registration_year", "theft_year")
+
+
+def _field_options():
+    """Dropdown values per field, taken from the live sources (cached 5 min).
+
+    Only distinct *values* are cached for the dropdowns - never vehicle rows.
+    """
+    now = time.time()
+    if _options_cache["data"] and now - _options_cache["at"] < _OPTIONS_TTL:
+        return _options_cache["data"]
+    options = {k: list(v) for k, v in STATIC_OPTIONS.items()}
+    try:
+        profiles = list_vehicle_profiles()
+    except Exception:
+        profiles = []
+    for field in OPTION_FIELDS:
+        values = {
+            str(p[field]).strip() for p in profiles
+            if p.get(field) and not str(p[field]).startswith("No ")
+        }
+        if values:
+            options[field] = sorted(values, key=str.casefold)
+    if profiles:                       # don't cache an outage
+        _options_cache.update(at=now, data=options)
+    return options
+
+
+@app.context_processor
+def _inject_form_data():
+    return {"sections": SECTIONS, "field_options": _field_options(),
+            "field_labels": DETAIL_LABELS}
+
+
+def _read_details(source):
+    """Optional operator-supplied details (make/model/color/owner/engine/chassis)."""
+    return {
+        field: (source.get(field) or "").strip()[:60]
+        for field in DETAIL_FIELDS
+        if (source.get(field) or "").strip()
+    }
+
+
+def _rank_unified(query, details, limit=FUZZY_TOP_K):
+    """Rank registrations by plate alone, or plate + details when provided.
+
+    Returns (candidates, best_plate, auto_ok, reason, used_details).
+    """
+    if details:
+        rows = list_vehicle_profiles()
+        if rows:
+            ranked = rank_with_details(
+                normalize_plate(query) or "", details, rows, limit
+            )
+            best, auto, reason = decide(ranked, used_details=True)
+            return ranked, best, auto, reason, True
+        # Registration DB unreachable: fall back to plate-only ranking.
+    candidates = _rank_plate_candidates(query, limit)
+    best, auto = _fuzzy_decision(candidates)
+    return candidates, best, auto, None, False
+
+
+def _describe_evidence(candidate):
+    fields = [f for f, v in (candidate.get("fields") or {}).items()
+              if v["status"] == "match"]
+    return "plate + " + ", ".join(
+        DETAIL_LABELS.get(f, f) for f in fields
+    ) if fields else "plate"
+
+
 @app.route("/", methods=["GET"])
 def home():
     plate = request.args.get("plate", "").strip()
@@ -434,16 +618,24 @@ def home():
     match_score = None
     error_message = None
     resolved_plate = plate
+    details = _read_details(request.args)
+    decision_reason = None
+    identified_by = None
 
     try:
-        if plate:
-            fuzzy_candidates = _rank_plate_candidates(plate)
-            fuzzy_best, fuzzy_auto = _fuzzy_decision(fuzzy_candidates)
+        if plate or details:
+            fuzzy_candidates, fuzzy_best, fuzzy_auto, decision_reason, used = (
+                _rank_unified(plate, details)
+            )
 
+            top = fuzzy_candidates[0] if fuzzy_candidates else None
             exact = bool(
-                fuzzy_candidates
-                and normalize_plate(fuzzy_candidates[0]["plate"]) == normalize_plate(plate)
-                and fuzzy_candidates[0]["score"] >= 0.999
+                top
+                and plate
+                and normalize_plate(top["plate"]) == normalize_plate(plate)
+                and top.get("plate_score", top["score"]) >= 0.999
+                and not any(v["status"] == "mismatch"
+                            for v in (top.get("fields") or {}).values())
             )
 
             # Never silently replace a typed plate with a fuzzy guess.
@@ -461,13 +653,15 @@ def home():
                 resolved_plate = fuzzy_best
                 match_score = fuzzy_candidates[0]["score"]
                 result = query_vehicle(resolved_plate)
+                if used:
+                    identified_by = _describe_evidence(fuzzy_candidates[0])
             else:
                 # Keep the raw query visible and ask the user to select a candidate.
                 result = {
                     "plate": plate,
                     "found": False,
                     "message": (
-                        "No exact registration was confirmed. Review the fuzzy "
+                        "No exact registration was confirmed. Review the "
                         "candidates above and select the correct plate."
                     ),
                 }
@@ -494,6 +688,10 @@ def home():
         fuzzy_auto=fuzzy_auto,
         match_score=match_score,
         error_message=error_message,
+        details=details,
+        decision_reason=decision_reason,
+        identified_by=identified_by,
+        plate_resolved=resolved_plate,
     )
 
 
@@ -518,16 +716,21 @@ def scan_plate_image():
 
         # Use the best OCR reading as the search query; do not report/write flags here.
         query = ocr_candidates[0]["plate"]
-        fuzzy_candidates = _rank_plate_candidates(query)
-        fuzzy_best, fuzzy_auto = _fuzzy_decision(fuzzy_candidates)
+        details = _read_details(request.form)
+        fuzzy_candidates, fuzzy_best, fuzzy_auto, decision_reason, used = (
+            _rank_unified(query, details)
+        )
 
         # Only run Vehicle 360 automatically when the best fuzzy match is strong
         # and sufficiently separated from the runner-up. Otherwise show suggestions.
         result = None
         match_score = None
+        identified_by = None
         if fuzzy_auto:
             result = query_vehicle(fuzzy_best)
             match_score = fuzzy_candidates[0]["score"]
+            if used:
+                identified_by = _describe_evidence(fuzzy_candidates[0])
         else:
             result = {
                 "plate": query,
@@ -549,6 +752,10 @@ def scan_plate_image():
             fuzzy_auto=fuzzy_auto,
             match_score=match_score,
             error_message=None,
+            details=details,
+            decision_reason=decision_reason,
+            identified_by=identified_by,
+            plate_resolved=fuzzy_best,
         )
 
     except PlateOCRInputError as exc:
