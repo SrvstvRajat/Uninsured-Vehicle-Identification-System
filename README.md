@@ -474,4 +474,15 @@ INSERT INTO theft_records (plate_no, theft_date, status, shredded_date) VALUES
 
 
 SELECT * FROM theft_records WHERE plate_no = 'DL01AB1099';
+
+
+#######
+
+USE vehicle_registration_db;
+
+INSERT INTO vehicles
+    (reg_plate, make, model, color, owner_name, engine_no, chassis_no)
+VALUES
+    ('DL01AB1234', 'Maruti', 'Swift', 'White', 'Asha Kumar',
+     'ENG000001', 'CHS00000032099');
 ```
