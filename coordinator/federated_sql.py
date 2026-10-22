@@ -62,6 +62,7 @@ except ImportError:
 # --------------------------------------------------------------------------
 # How long to wait for a source REST API to answer (seconds)
 API_TIMEOUT_SEC = int(os.getenv("SOURCE_API_TIMEOUT_SEC", "30"))
+HEALTH_TIMEOUT_SEC = 3
 MAX_FETCH_ROWS = int(os.getenv("SQL_CONSOLE_MAX_FETCH_ROWS", "200000"))
 MAX_DISPLAY_ROWS = int(os.getenv("SQL_CONSOLE_MAX_DISPLAY_ROWS", "1000"))
 INTEGRATION_TIMEOUT_SEC = int(os.getenv("SQL_CONSOLE_TIMEOUT_SEC", "20"))
@@ -592,6 +593,12 @@ def _build_fragments(tree: exp.Expression, refs: list[exp.Table]) -> dict[str, d
 # --------------------------------------------------------------------------
 # LAN calls to the source laptops must not go through a system HTTP proxy.
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+HEALTH_SOURCES = {
+    "vehicles": ("Registration", "vehicle_registration_db"),
+    "insurance": ("Insurance", "insurance_db"),
+    "rto": ("RTO", "rto_db"),
+    "theft": ("Theft", "theft_db"),
+}
 
 
 def _endpoint(source: str, path: str = "/api/query") -> str:
@@ -628,6 +635,39 @@ def _api_call(source: str, path: str, payload: dict) -> dict:
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Cannot reach the {source} REST API at {base} ({exc.reason}). "
                            "Is source_api.py running on that laptop?")
+
+
+def check_source_health() -> list[dict]:
+    """Check database reachability for each of the four federated source APIs."""
+    def check_one(source: str, label: str, database: str) -> dict:
+        base = SOURCE_API_URLS.get(source, "")
+        if not base:
+            return {
+                "source": label, "database": database, "available": False,
+                "error": f"No REST API URL configured for '{source}'.",
+            }
+
+        req = urllib.request.Request(base + "/api/health", method="GET")
+        try:
+            with _OPENER.open(req, timeout=HEALTH_TIMEOUT_SEC) as resp:
+                health = json.loads(resp.read().decode("utf-8"))
+            available = health.get("database_reachable") is True
+            return {
+                "source": label, "database": database, "available": available,
+                "error": None if available else f"{label} database is not reachable.",
+            }
+        except Exception as exc:
+            return {
+                "source": label, "database": database, "available": False,
+                "error": str(exc),
+            }
+
+    with ThreadPoolExecutor(max_workers=len(HEALTH_SOURCES)) as pool:
+        checks = [
+            pool.submit(check_one, source, label, database)
+            for source, (label, database) in HEALTH_SOURCES.items()
+        ]
+        return [check.result() for check in checks]
 
 
 def _api_fetch(source: str, sql: str) -> tuple[list[str], list[tuple]]:
