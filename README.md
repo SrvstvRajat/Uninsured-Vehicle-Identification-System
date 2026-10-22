@@ -486,3 +486,10 @@ VALUES
     ('DL01AB1234', 'Maruti', 'Swift', 'White', 'Asha Kumar',
      'ENG000001', 'CHS00000032099');
 ```
+
+USE rto_db;
+
+INSERT INTO rto_records
+    (car_id, registration_date, renewal_date, rto_office)
+VALUES
+    ('DL01AB1234', '2022-05-15', '2027-05-15', 'Delhi South RTO');
