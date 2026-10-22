@@ -417,7 +417,7 @@ tbody tr:hover{background:#FAFBFD}
 .plate{display:inline-flex;align-items:stretch;border:1.5px solid var(--navy);border-radius:6px;overflow:hidden;background:#fff;font-family:"JetBrains Mono",monospace;font-weight:600;font-size:14px;letter-spacing:.1em;color:var(--navy);white-space:nowrap}
 .plate::before{content:"IND";display:grid;place-items:center;padding:0 6px;background:var(--navy);color:#fff;font-size:8.5px;letter-spacing:.08em}
 .plate span{padding:4px 10px}
-.badge{display:inline-flex;align-items:center;padding:4px 10px;border-radius:100px;font-size:11px;font-weight:700;letter-spacing:.02em;margin:0 0 6px;border:1px solid transparent}
+.badge{display:inline-flex;align-items:center;white-space:nowrap;padding:4px 10px;border-radius:100px;font-size:11px;font-weight:700;letter-spacing:.02em;margin:0 0 6px;border:1px solid transparent}
 .badge-insurance{background:var(--b-insurance-bg);color:var(--b-insurance)}
 .badge-emissions{background:var(--b-emissions-bg);color:var(--b-emissions)}
 .badge-registration{background:var(--b-registration-bg);color:var(--b-registration)}
@@ -441,6 +441,10 @@ tbody tr:hover{background:#FAFBFD}
 .source-theft input:focus,.source-theft textarea:focus{
   border-color:#D97068;box-shadow:0 0 0 4px rgba(217,112,104,.16)}
 .source-theft .clear-button:hover{border-color:#D97068;color:#A94442}
+.record-delete-form{margin:0}
+.record-delete-cell,.record-delete-form,.record-delete-button{white-space:nowrap}
+.record-delete-button{height:36px;padding:0 14px;background:#A33A3A;box-shadow:none}
+.record-delete-button:hover{background:#852D2D}
 .flag-text{display:block;max-width:46ch}
 .empty{text-align:center;padding:56px 26px;color:var(--ink-2)}
 .empty strong{display:block;font-family:"Newsreader",serif;font-weight:500;font-size:20px;color:var(--ink);margin-bottom:4px}
@@ -522,13 +526,14 @@ button.brass:hover{background:linear-gradient(180deg,#CCAA66,#9F7A35)}
         <span class="meta">{{ records|length }} {{ record_singular if records|length == 1 else record_plural }}</span>
       </div>
       <div class="table-container"><table>
-        <thead><tr>{% for col in columns %}<th>{{ col.replace('_', ' ')|capitalize }}</th>{% endfor %}</tr></thead>
+        <thead><tr>{% for col in columns %}<th>{{ col.replace('_', ' ')|capitalize }}</th>{% endfor %}
+          {% if delete_enabled %}<th>Actions</th>{% endif %}</tr></thead>
         <tbody>
         {% for row in records %}
           <tr>
           {% for col in columns %}
             <td{% if loop.first and col == 'id' %} class="col-id"{% endif %}>
-              {%- if col == 'vehicle_plate' and row[col] -%}
+              {%- if col in ('vehicle_plate', 'plate_no') and row[col] -%}
                 <span class="plate"><span>{{ row[col] }}</span></span>
               {%- elif col == 'flag_reason' -%}
                 {% if row['_badge'] %}<span class="badge badge-{{ row['_badge'] }}">{{ row['_badge']|capitalize }}</span>{% endif %}
@@ -544,9 +549,19 @@ button.brass:hover{background:linear-gradient(180deg,#CCAA66,#9F7A35)}
               {%- endif -%}
             </td>
           {% endfor %}
+          {% if delete_enabled %}
+            <td class="record-delete-cell">
+              <form class="record-delete-form" method="post" action="/delete"
+                    onsubmit="return confirm('Delete theft record #{{ row['id'] }}? This cannot be undone.')">
+                <input type="hidden" name="record_id" value="{{ row['id'] }}">
+                <input type="hidden" name="plate" value="{{ row.get('vehicle_plate') or row.get('plate_no') or '' }}">
+                <button type="submit" class="record-delete-button">Delete</button>
+              </form>
+            </td>
+          {% endif %}
           </tr>
         {% else %}
-          <tr><td colspan="{{ columns|length or 1 }}" class="empty">
+          <tr><td colspan="{{ columns|length + (1 if delete_enabled else 0) or 1 }}" class="empty">
             <strong>No records found</strong>
             {% if plate %}Check the plate for typos{% if write_enabled %}, or add a record using the form{% endif %}.{% else %}Nothing has been filed yet.{% endif %}
           </td></tr>
@@ -640,9 +655,14 @@ def source_ui():
         cur = conn.cursor(dictionary=True)
         cur.execute(f"SELECT COUNT(*) AS total FROM `{TABLE}`")
         total = cur.fetchone()["total"]
-        if plate and "vehicle_plate" in columns:
+        plate_column = next((column for column in columns
+                             if column.lower() in {"vehicle_plate", "plate_no"}), None)
+        if plate and plate_column:
             key = re.sub(r"[\s-]+", "", plate).upper()
-            cur.execute(f"SELECT * FROM `{TABLE}` WHERE REPLACE(REPLACE(UPPER(`vehicle_plate`),' ',''),'-','')=%s ORDER BY 1 DESC LIMIT 200", (key,))
+            cur.execute(
+                f"SELECT * FROM `{TABLE}` WHERE "
+                f"REPLACE(REPLACE(UPPER(`{plate_column}`),' ',''),'-','')=%s "
+                "ORDER BY 1 DESC LIMIT 200", (key,))
         else:
             cur.execute(f"SELECT * FROM `{TABLE}` ORDER BY 1 DESC LIMIT 100")
         records = cur.fetchall()
@@ -657,12 +677,15 @@ def source_ui():
         return render_template_string(UI_TEMPLATE, **_ui_copy(),
             plate=plate, columns=columns, records=records, total=total,
             insert_columns=insert_columns, required_columns=required_columns,
-            date_columns=date_columns, write_enabled=ALLOW_WRITES, error=None)
+            date_columns=date_columns, write_enabled=ALLOW_WRITES,
+            delete_enabled=ALLOW_WRITES and SOURCE_NAME == "theft" and "id" in columns,
+            error=None)
     except Exception as exc:
         app.logger.exception("Source UI failed")
         return render_template_string(UI_TEMPLATE, **_ui_copy(),
             plate=plate, columns=[], records=[], total=0, insert_columns=[],
             required_columns=[], date_columns=[], write_enabled=ALLOW_WRITES,
+            delete_enabled=False,
             error=f"Could not load records: {exc}"), 500
     finally:
         if conn is not None and conn.is_connected():
@@ -700,13 +723,57 @@ def source_ui_add():
         conn.commit()
         cur.close()
         flash("Record added successfully.", "success")
-        return redirect(url_for("source_ui", plate=values.get("vehicle_plate", "")))
+        return redirect(url_for(
+            "source_ui", plate=values.get("vehicle_plate") or values.get("plate_no", "")))
     except Exception as exc:
         if conn is not None:
             conn.rollback()
         app.logger.exception("Source UI insert failed")
         flash(f"Could not add record: {exc}", "error")
         return redirect(url_for("source_ui"))
+    finally:
+        if conn is not None and conn.is_connected():
+            conn.close()
+
+
+@app.post("/delete")
+def source_ui_delete():
+    if SOURCE_NAME != "theft":
+        return jsonify(error="Record deletion is only available on the theft source."), 404
+    if not ALLOW_WRITES:
+        return "Deleting records is disabled. Set SOURCE_API_ALLOW_WRITES=true on this source and restart.", 403
+
+    plate = request.form.get("plate", "").strip()
+    record_id = request.form.get("record_id", "").strip()
+    if not record_id.isdecimal() or int(record_id) < 1:
+        flash("Select a valid theft record to delete.", "error")
+        return redirect(url_for("source_ui", plate=plate))
+
+    conn = None
+    try:
+        conn = _connect()
+        columns = {metadata[0].lower() for metadata in _ui_columns(conn)}
+        if "id" not in columns:
+            flash("The theft records table has no record ID field.", "error")
+            return redirect(url_for("source_ui", plate=plate))
+
+        cur = conn.cursor()
+        cur.execute(f"DELETE FROM `{TABLE}` WHERE `id`=%s", (int(record_id),))
+        deleted = cur.rowcount
+        conn.commit()
+        cur.close()
+        if deleted:
+            flash(f"Theft record #{record_id} deleted.", "success")
+            return redirect(url_for("source_ui"))
+        else:
+            flash(f"Theft record #{record_id} was not found.", "error")
+        return redirect(url_for("source_ui", plate=plate))
+    except Exception as exc:
+        if conn is not None:
+            conn.rollback()
+        app.logger.exception("Source UI delete failed")
+        flash(f"Could not delete theft record: {exc}", "error")
+        return redirect(url_for("source_ui", plate=plate))
     finally:
         if conn is not None and conn.is_connected():
             conn.close()
