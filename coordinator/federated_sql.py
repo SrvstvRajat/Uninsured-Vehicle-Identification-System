@@ -16,6 +16,10 @@ This module:
      functions run in a throw-away in-memory engine over the fetched
      fragments (nothing is stored; it is discarded after every query)
 
+Fuzzy predicates (`plate_col = 'NOISY'`) are resolved by SIMILARITY MATCHING
+on the owning source (POST /api/similar): the source scores its own stored
+values and returns only the best ones, which replace the literal.
+
 No vehicle_master table is built, so the architecture stays
 "federated / mediated", the same as mediator.py.
 """
@@ -34,7 +38,6 @@ import urllib.request
 from collections import Counter
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from difflib import SequenceMatcher
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Callable, Optional
@@ -44,18 +47,8 @@ from sqlglot import exp
 
 from config import SOURCE_API_TOKENS, SOURCE_API_URLS
 
-# fuzzy_match.py (OCR-aware plate matcher) lives next to this file, or in the
-# project root. Both locations are tried.
-try:
-    from fuzzy_match import (fold_lookalikes as _fold, normalize_plate as _fz_norm,
-                             plate_similarity as _fz_sim, edit_similarity as _edit_sim)
-except ImportError:
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    try:
-        from fuzzy_match import (fold_lookalikes as _fold, normalize_plate as _fz_norm,
-                                 plate_similarity as _fz_sim, edit_similarity as _edit_sim)
-    except ImportError:
-        _fz_sim = None
+# All REST calls to the source laptops go through source_client.py.
+from source_client import COLUMN_KINDS, api_call as _api_call, similar as _similar
 
 # --------------------------------------------------------------------------
 # Settings
@@ -70,18 +63,11 @@ INTEGRATION_TIMEOUT_SEC = int(os.getenv("SQL_CONSOLE_TIMEOUT_SEC", "20"))
 # The source DB's own GRANTs still have the final say.
 ALLOW_WRITES = os.getenv("SQL_CONSOLE_ALLOW_WRITES", "false").lower() == "true"
 
-# Fuzzy plate matching: `plate_col = 'NOISY'` / `plate_col IN (...)` is resolved
-# against the plates actually stored in the source DB (same matcher as the
-# registration server's fuzzy_match.py).
+# Fuzzy matching: `col = 'NOISY'` / `col IN (...)` on a fuzzy-capable column is
+# sent to the owning source's /api/similar, which scores its stored values
+# (thresholds are configured on the source: SOURCE_API_SIMILAR_MIN / _FLOOR).
 FUZZY_DEFAULT = os.getenv("SQL_CONSOLE_FUZZY", "true").lower() == "true"
-FUZZY_MIN_SCORE = float(os.getenv("SQL_CONSOLE_FUZZY_MIN", "0.60"))  # = REVIEW_SCORE
 FUZZY_MAX_MATCHES = int(os.getenv("SQL_CONSOLE_FUZZY_TOP", "25"))
-# If nothing reaches FUZZY_MIN_SCORE, still return the closest FUZZY_FALLBACK_N values
-# that score at least FUZZY_FLOOR ("best available", flagged low-confidence).
-# Set SQL_CONSOLE_FUZZY_FLOOR=0 to ALWAYS return the closest values.
-FUZZY_FALLBACK_N = int(os.getenv("SQL_CONSOLE_FUZZY_FALLBACK", "5"))
-FUZZY_FLOOR = float(os.getenv("SQL_CONSOLE_FUZZY_FLOOR", "0.25"))
-FUZZY_BLOCK_SIZE = 300  # candidates kept by the cheap bigram filter
 
 
 # --------------------------------------------------------------------------
@@ -138,19 +124,12 @@ TABLES: dict[str, dict] = {
     },
 }
 
-# Which columns get fuzzy matching, and how:
-#   plate = OCR-aware plate matcher     code = OCR-aware edit distance (engine/chassis/policy)
-#   name  = token-based (any word order, partial names)    text = general text similarity
+# Which columns get fuzzy matching, and how (same map the sources use):
+#   plate = OCR-aware plate matcher     code = OCR-aware edit distance
+#   name  = token-based (any word order, partial names)    text = general text
 # Dates, ids and amounts are always matched exactly.
 FUZZY_COLUMNS: dict[str, dict[str, str]] = {
-    "vehicles": {"reg_plate": "plate", "make": "text", "model": "text", "color": "text",
-                 "owner_name": "name", "engine_no": "code", "chassis_no": "code"},
-    "insurance_policies": {"vehicle_number": "plate", "insurer_name": "text",
-                           "policy_no": "code"},
-    "rto_records": {"car_id": "plate", "rto_office": "text"},
-    "theft_records": {"plate_no": "plate", "status": "text"},
-    "mot_reports": {"vehicle_plate": "plate", "flag_reason": "text",
-                    "reported_by": "name"},
+    table: COLUMN_KINDS.get(spec["source"], {}) for table, spec in TABLES.items()
 }
 
 PLATE_KEY = "plate_key"  # virtual column: normalised plate, same rule as mediator.py
@@ -249,117 +228,20 @@ def _validate_tables(tree: exp.Expression) -> list[exp.Table]:
 
 
 # --------------------------------------------------------------------------
-# Fuzzy plate resolution (noisy / OCR plate  ->  plates really stored)
+# Fuzzy resolution (noisy value -> values really stored, scored ON THE SOURCE)
 # --------------------------------------------------------------------------
-def _bigrams(text: str) -> set:
-    return {text[i:i + 2] for i in range(len(text) - 1)}
-
-
-def _alnum(x: Any) -> str:
-    return re.sub(r"[^a-z0-9]", "", str(x).casefold())
-
-
-def _tokens(x: Any) -> list[str]:
-    return re.findall(r"[a-z0-9]+", str(x).casefold())
-
-
-def _containment(q: str, c: str) -> float:
-    """Partial input: 'UP09' inside 'UP09AI8815', 'rajat' inside 'rajatsharma'."""
-    if len(q) < 2 or q not in c:
-        return 0.0
-    score = 0.70 + 0.30 * len(q) / len(c)
-    if c.startswith(q):
-        score += 0.05
-    return min(score, 0.99)
-
-
-def _token_score(q: str, c: str) -> float:
-    """Word-order independent, partial-name tolerant (rajat sharma / sharma, rajat / rajat)."""
-    qt, ct = _tokens(q), _tokens(c)
-    if not qt or not ct:
-        return 0.0
-    best = [max(SequenceMatcher(None, a, b, autojunk=False).ratio() for b in ct)
-            for a in qt]
-    coverage = 0.85 + 0.15 * min(1.0, len(qt) / len(ct))
-    return (sum(best) / len(best)) * coverage
-
-
-def _score(kind: str, query: str, cand: str) -> float:
-    """Similarity 0..1 between the typed value and one stored value."""
-    if kind == "plate":
-        q, c = _fz_norm(query), _fz_norm(cand)
-        s = max(_fz_sim(q, c), _fz_sim(c, q))
-        return max(s, _containment(_fold(q), _fold(c)))
-    q, c = _alnum(query), _alnum(cand)
-    if not q or not c:
-        return 0.0
-    if q == c:
-        return 1.0
-    if kind == "code":
-        qu, cu = query.upper(), cand.upper()
-        qu, cu = re.sub(r"[^A-Z0-9?@#*]", "", qu), re.sub(r"[^A-Z0-9?@#*]", "", cu)
-        return max(_edit_sim(qu, cu, ocr_aware=True),
-                   _containment(_fold(qu), _fold(cu)))
-    s = max(SequenceMatcher(None, q, c, autojunk=False).ratio(), _containment(q, c))
-    if kind in ("name", "text"):
-        s = max(s, _token_score(query, cand))
-    return s
-
-
-def _is_exact(kind: str, query: str, cand: str) -> bool:
-    return (_fz_norm(query) == _fz_norm(cand)) if kind == "plate" \
-        else (_alnum(query) == _alnum(cand) and _alnum(query) != "")
-
-
-def _match_value(kind: str, query: str, stored: list[str]) -> dict:
-    """
-    Find the stored values that best match whatever was typed.
-      * exact (normalised) hit            -> returned alone
-      * score >= FUZZY_MIN_SCORE          -> all of them, best first
-      * nothing that good                 -> closest few ("best available"),
-                                             flagged low_confidence
-    Large plate/code columns are first narrowed by a cheap look-alike-folded
-    bigram filter (plus every value that contains the typed text).
-    """
-    exact = [v for v in stored if _is_exact(kind, query, v)]
-    if exact:
-        return {"exact": True, "low_confidence": False,
-                "matches": [(v, 1.0) for v in exact[:FUZZY_MAX_MATCHES]]}
-
-    pool = stored
-    if kind in ("plate", "code") and len(stored) > FUZZY_BLOCK_SIZE:
-        norm = (lambda x: _fold(_fz_norm(x))) if kind == "plate" \
-            else (lambda x: _fold(re.sub(r"[^A-Z0-9]", "", str(x).upper())))
-        qf = norm(query)
-        qg = _bigrams(qf)
-
-        def jac(v: str) -> float:
-            g = _bigrams(norm(v))
-            return len(qg & g) / (len(qg | g) or 1)
-
-        ranked = sorted(stored, key=lambda v: -jac(v))[:FUZZY_BLOCK_SIZE]
-        contains = [v for v in stored if len(qf) >= 2 and qf in norm(v)]
-        pool = list(dict.fromkeys(ranked + contains))
-
-    scored = sorted(((v, round(_score(kind, query, v), 4)) for v in pool),
-                    key=lambda x: (-x[1], x[0]))
-    good = [m for m in scored if m[1] >= FUZZY_MIN_SCORE]
-    if good:
-        return {"exact": False, "low_confidence": False,
-                "matches": good[:FUZZY_MAX_MATCHES]}
-    near = [m for m in scored[:FUZZY_FALLBACK_N] if m[1] >= FUZZY_FLOOR and m[1] > 0]
-    return {"exact": False, "low_confidence": bool(near), "matches": near}
-
-
 def _apply_fuzzy(tree: exp.Expression, refs: list[exp.Table],
-                 fetcher: Callable, notes: Optional[list] = None) -> list[dict]:
+                 similar_fn: Optional[Callable] = None,
+                 notes: Optional[list] = None) -> list[dict]:
     """
     Rewrite  column = 'typed'  /  column IN ('typed',..)  for any fuzzy-capable
     column into  column IN (<stored values that best match>)  in place, and
     return a description of what was done for the plan view.
+
+    The matching itself runs on the owning source (POST /api/similar);
+    `similar_fn` is injectable so this can be unit-tested without the APIs.
     """
-    if _fz_sim is None:
-        return []
+    similar_fn = similar_fn or _similar
 
     alias_map: dict[str, str] = {}
     names = set()
@@ -402,7 +284,6 @@ def _apply_fuzzy(tree: exp.Expression, refs: list[exp.Table],
                     and all(isinstance(e, exp.Literal) and e.is_string for e in exprs)):
                 sites.append((node, col, [e.this for e in exprs]))
 
-    stored_cache: dict[tuple[str, str], list[str]] = {}
     steps: list[dict] = []
     for node, col, literals in sites:
         # A '%' inside a literal means the user wants a wildcard pattern
@@ -423,28 +304,23 @@ def _apply_fuzzy(tree: exp.Expression, refs: list[exp.Table],
         tn, real_col, kind = tgt
         spec = TABLES[tn]
         t0 = time.perf_counter()
-        key = (tn, real_col)
-        if key not in stored_cache:
-            # only this one column travels, not whole rows
-            sql = (f"SELECT DISTINCT {real_col} FROM {tn} WHERE {real_col} IS NOT NULL "
-                   f"LIMIT {MAX_FETCH_ROWS}")
+        per_literal, matched, scanned, via = [], [], 0, None
+        for lit in literals:
             try:
-                _, rows = fetcher(spec["source"], sql)
+                res = similar_fn(spec["source"], real_col, lit,
+                                 limit=FUZZY_MAX_MATCHES)
             except Exception as exc:
                 raise QueryError(
                     f"Fuzzy matching needs {spec['source']} "
                     f"({spec['database']}), which failed: {exc}")
-            stored_cache[key] = [str(r[0]) for r in rows]
-        stored = stored_cache[key]
-
-        per_literal, matched = [], []
-        for lit in literals:
-            res = _match_value(kind, lit, stored)
+            scanned = max(scanned, int(res.get("candidates_scanned") or 0))
+            via = res.get("via") or via
             per_literal.append({
-                "query": lit, "exact": res["exact"],
-                "low_confidence": res["low_confidence"],
-                "matches": [{"plate": v, "score": sc} for v, sc in res["matches"]]})
-            matched += [v for v, _ in res["matches"]]
+                "query": lit, "exact": bool(res.get("exact")),
+                "low_confidence": bool(res.get("low_confidence")),
+                "matches": [{"plate": m["value"], "score": m["score"]}
+                            for m in res.get("matches") or []]})
+            matched += [m["value"] for m in res.get("matches") or []]
 
         is_key = col.name.lower() == PLATE_KEY
         values = sorted({_normalize_plate(v) if is_key else v for v in matched if v})
@@ -455,7 +331,9 @@ def _apply_fuzzy(tree: exp.Expression, refs: list[exp.Table],
         steps.append({
             "table": tn, "source": spec["source"], "database": spec["database"],
             "column": real_col, "kind": kind, "original": original_pred,
-            "literals": per_literal, "candidates_scanned": len(stored),
+            "literals": per_literal, "candidates_scanned": scanned,
+            "matched_on": "coordinator (fallback)" if via == "coordinator-fallback"
+                          else "source",
             "rewritten": bool(values),
             "ms": round((time.perf_counter() - t0) * 1000, 1),
         })
@@ -604,37 +482,6 @@ HEALTH_SOURCES = {
 def _endpoint(source: str, path: str = "/api/query") -> str:
     base = SOURCE_API_URLS.get(source, "")
     return f"{base}{path}" if base else ""
-
-
-def _api_call(source: str, path: str, payload: dict) -> dict:
-    """POST a JSON payload to one source laptop's REST API and return its JSON."""
-    base = SOURCE_API_URLS.get(source, "")
-    if not base:
-        raise RuntimeError(
-            f"No REST API URL configured for '{source}'. Set {source.upper()}_API_URL "
-            "in .env, e.g. http://<that-laptop-ip>:5100")
-    headers = {"Content-Type": "application/json"}
-    token = SOURCE_API_TOKENS.get(source, "")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(base + path, data=json.dumps(payload).encode("utf-8"),
-                                 headers=headers, method="POST")
-    try:
-        with _OPENER.open(req, timeout=API_TIMEOUT_SEC) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        try:
-            detail = json.loads(exc.read().decode("utf-8")).get("error")
-        except Exception:
-            detail = None
-        raise RuntimeError(f"{source} REST API answered HTTP {exc.code}: "
-                           f"{detail or exc.reason}")
-    except (socket.timeout, TimeoutError):
-        raise RuntimeError(f"The {source} REST API at {base} did not answer within "
-                           f"{API_TIMEOUT_SEC}s")
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Cannot reach the {source} REST API at {base} ({exc.reason}). "
-                           "Is source_api.py running on that laptop?")
 
 
 def check_source_health() -> list[dict]:
@@ -803,7 +650,7 @@ def run_federated(sql: str, explain_only: bool = False,
         refs = _validate_tables(tree)
         use_fuzzy = FUZZY_DEFAULT if fuzzy is None else bool(fuzzy)
         pattern_notes: list[str] = []
-        fuzzy_steps = (_apply_fuzzy(tree, refs, fetcher, pattern_notes)
+        fuzzy_steps = (_apply_fuzzy(tree, refs, notes=pattern_notes)
                        if use_fuzzy else [])
         frags = _build_fragments(tree, refs)
         engine_tree = _strip_db_qualifiers(tree)

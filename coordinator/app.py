@@ -1492,11 +1492,13 @@ import time
 from functools import lru_cache
 from pathlib import Path
 
-from mediator import (query_vehicle, list_candidate_plates, normalize_plate,
-                      list_vehicle_profiles, check_source_status)
-from fuzzy_match import plate_similarity
-from detail_match import (rank_with_details, decide, DETAIL_FIELDS,
-                          SECTIONS, DETAIL_LABELS)
+# Similarity matching runs on the source laptops (/api/similar); the mediator
+# does entity matching across sources and returns ranked vehicles.
+from mediator import (query_vehicle, normalize_plate, check_source_status,
+                      identify, similar_plates, similar_field_values,
+                      field_option_values)
+from detail_match import DETAIL_FIELDS, SECTIONS, DETAIL_LABELS
+from fuzzy_match import IDENTIFIER_PREFIXES, normalize_identifier
 from plate_ocr import (recognize_plate_image, MAX_IMAGE_BYTES,
                        PlateOCRInputError, PlateOCREngineError)
 from reporting import report_flags
@@ -2121,6 +2123,10 @@ body.ui{
                         {% else %}
                             <span class="noflag">No flags raised</span>
                         {% endif %}
+                        {% if result.get('link_notes') %}
+                            <div class="lbl">Linked by entity matching</div>
+                            {% for note in result['link_notes'] %}<span class="noflag">{{ note }}</span><br>{% endfor %}
+                        {% endif %}
                     </div>
                 </div>
 
@@ -2302,45 +2308,6 @@ def _as_query_list(query):
     return keys
 
 
-def _rank_plate_candidates(query, limit=FUZZY_TOP_K):
-    """Compare the query (or several corrected variants) with live plate identifiers.
-
-    Each registered plate keeps its best score across all variants.
-    """
-    query_keys = _as_query_list(query)
-    if not query_keys:
-        return []
-
-    scores = {}
-    for raw_plate in list_candidate_plates():
-        canonical = normalize_plate(raw_plate)
-        if not canonical:
-            continue
-        score = max(plate_similarity(key, canonical) for key in query_keys)
-        if canonical not in scores or score > scores[canonical]:
-            scores[canonical] = score
-
-    return [
-        {"plate": plate, "score": score}
-        for plate, score in sorted(
-            scores.items(), key=lambda item: (-item[1], item[0])
-        )[:limit]
-    ]
-
-
-def _fuzzy_decision(candidates):
-    """Auto-select only a strong, unambiguous candidate; otherwise review."""
-    if not candidates:
-        return None, False
-    best_score = candidates[0]["score"]
-    second_score = candidates[1]["score"] if len(candidates) > 1 else 0.0
-    safe = (
-        best_score >= FUZZY_MIN_SCORE
-        and best_score - second_score >= FUZZY_MIN_MARGIN
-    )
-    return candidates[0]["plate"], safe
-
-
 _OPTIONS_TTL = 300      # seconds to reuse the dropdown values
 _OUTAGE_TTL = 30        # shorter reuse while the live sources are unreachable
 _options_cache = {"at": 0.0, "ttl": 0, "data": {}, "models": {}}
@@ -2426,16 +2393,14 @@ def _field_options():
     models_by_make = {make: set(models) for make, models in dataset_models.items()}
 
     try:
-        profiles = list_vehicle_profiles()
+        live_values, live_models, answered = field_option_values()
     except Exception:
-        profiles = []
-    for profile in profiles:
-        for field in OPTION_FIELDS:
-            if _clean_value(profile.get(field)):
-                merged[field].add(_clean_value(profile[field]))
-        make, model = _clean_value(profile.get("make")), _clean_value(profile.get("model"))
-        if make and model:
-            models_by_make.setdefault(make, set()).add(model)
+        live_values, live_models, answered = {}, {}, False
+    for field, vals in live_values.items():
+        if field in merged:
+            merged[field].update(v for v in (_clean_value(x) for x in vals) if v)
+    for make, models in live_models.items():
+        models_by_make.setdefault(make, set()).update(models)
 
     options = {k: list(v) for k, v in STATIC_OPTIONS.items()}
     for field, vals in merged.items():
@@ -2446,7 +2411,7 @@ def _field_options():
 
     _options_cache.update(
         at=now, data=options, models=models,
-        ttl=_OPTIONS_TTL if profiles else _OUTAGE_TTL,
+        ttl=_OPTIONS_TTL if answered else _OUTAGE_TTL,
     )
     return options, models
 
@@ -2490,29 +2455,17 @@ MAX_DETAIL_VARIANTS = 6   # corrected readings ranked when extra details are sup
 
 
 def _rank_unified(query, details, limit=FUZZY_TOP_K):
-    """Rank registrations by plate alone, or plate + details when provided.
+    """Rank vehicles by plate alone, or plate + details when provided.
 
-    `query` is one plate string or a list of corrected variants (best guess first).
+    `query` is one plate string or a list of corrected variants (best guess
+    first). Each source does the similarity matching on its own data; the
+    mediator links the returned records into vehicles (entity matching).
     Returns (candidates, best_plate, auto_ok, reason, used_details).
     """
-    if details:
-        rows = list_vehicle_profiles()
-        if rows:
-            keys = _as_query_list(query)[:MAX_DETAIL_VARIANTS] or [""]
-            merged = {}
-            for key in keys:
-                for item in rank_with_details(key, details, rows, limit):
-                    prev = merged.get(item["plate"])
-                    if prev is None or item["score"] > prev["score"]:
-                        merged[item["plate"]] = item
-            ranked = sorted(merged.values(),
-                            key=lambda item: (-item["score"], item["plate"]))[:limit]
-            best, auto, reason = decide(ranked, used_details=True)
-            return ranked, best, auto, reason, True
-        # Registration DB unreachable: fall back to plate-only ranking.
-    candidates = _rank_plate_candidates(query, limit)
-    best, auto = _fuzzy_decision(candidates)
-    return candidates, best, auto, None, False
+    outcome = identify(_as_query_list(query)[:MAX_DETAIL_VARIANTS], details, limit)
+    reason = outcome["reason"] if outcome["used_details"] else None
+    return (outcome["candidates"], outcome["best"], outcome["auto"], reason,
+            outcome["used_details"])
 
 
 def _plate_correction(plate):
@@ -2739,18 +2692,6 @@ def scan_plate_image():
 # Data Cleaning Workbench (/cleaning)
 # The registration-plate trace now includes position-aware correction.
 # =====================================================================
-try:
-    from fuzzy_match import IDENTIFIER_PREFIXES, normalize_identifier
-except ImportError:
-    # Fallbacks: this project's fuzzy_match.py does not define these helpers.
-    IDENTIFIER_PREFIXES = {"engine_no": "ENG", "chassis_no": "CH"}
-
-    def normalize_identifier(value, field):
-        """Strip the standard prefix (if present) to expose the serial payload."""
-        prefix = IDENTIFIER_PREFIXES.get(field, "")
-        value = str(value or "")
-        return value[len(prefix):] if prefix and value.startswith(prefix) else value
-
 CLEANING_TEMPLATE = r"""
 <!doctype html>
 <html lang="en">
@@ -2887,51 +2828,21 @@ def _cleaning_normalize(field, raw):
 
 
 def _cleaning_candidates(field, normalized, limit=5, variants=None):
-    """Fetch known candidate values via existing mediator lookups where possible.
+    """Known values similar to the input, scored ON THE SOURCES (/api/similar).
 
-    For registration plates, `variants` (position-corrected readings) are compared
+    For registration plates, `variants` (position-corrected readings) are sent
     too and each registered plate keeps its best score.
     """
-    from difflib import SequenceMatcher
-    candidates = []
+    if not normalized:
+        return []
     try:
-        plates = list_candidate_plates() or []
-    except Exception:
-        plates = []
-    if field == "reg_plate":
-        keys = [k for k in dict.fromkeys([normalized] + list(variants or [])) if k]
-        best_by_plate = {}
-        for plate in plates:
-            canonical = normalize_plate(plate)
-            if not canonical:
-                continue
-            score = max(float(plate_similarity(key, canonical)) for key in keys)
-            if canonical not in best_by_plate or score > best_by_plate[canonical]:
-                best_by_plate[canonical] = score
-        candidates = [{"value": p, "score": s} for p, s in best_by_plate.items()]
-    else:
-        # query_vehicle exposes the vehicle fields used by the existing lookup page.
-        # We only use values that the mediator actually returns; no values are fabricated.
-        seen = set()
-        for plate in plates:
-            try:
-                record = query_vehicle(plate)
-            except Exception:
-                continue
-            if not isinstance(record, dict) or not record.get("found"):
-                continue
-            key_map = {"model": "model", "engine_no": "engine_no", "chassis_no": "chassis_no"}
-            value = str(record.get(key_map[field]) or "").strip()
-            if not value:
-                continue
-            normalized_candidate = _cleaning_normalize(field, value)
-            if normalized_candidate in seen:
-                continue
-            seen.add(normalized_candidate)
-            score = SequenceMatcher(None, normalized.casefold(), normalized_candidate.casefold(), autojunk=False).ratio()
-            candidates.append({"value": value, "score": score})
-    candidates.sort(key=lambda item: (-item["score"], item["value"]))
-    return candidates[:limit]
+        if field == "reg_plate":
+            keys = [k for k in dict.fromkeys([normalized] + list(variants or [])) if k]
+            return similar_plates(keys, limit=limit)
+        return similar_field_values(field, normalized, limit=limit)
+    except Exception as exc:
+        print(f"[app] cleaning candidates for {field} failed: {exc}")
+        return []
 
 
 def _describe_changes(changes):

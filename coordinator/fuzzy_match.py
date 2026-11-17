@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import heapq
 import itertools
 import re
 from collections import Counter, defaultdict
@@ -48,6 +49,10 @@ OCR_CONFUSIONS = {
     frozenset(("K", "X")),
 }
 WILDCARD_CHARS = frozenset(("?", "@", "#", "*"))
+IDENTIFIER_PREFIXES = {
+    "engine_no": "ENG",
+    "chassis_no": "CHS",
+}
 SPLIT_MERGE_CONFUSIONS = (
     ("W", "VV"),
     ("M", "IV"),
@@ -296,6 +301,25 @@ def edit_similarity(left, right, ocr_aware=False, confusion_costs=None):
         before_previous, previous = previous, current
 
     return max(0.0, 1.0 - previous[-1] / max(len(left), len(right)))
+
+
+def normalize_identifier(value, field):
+    """Remove identifier formatting and the standard prefix for its field."""
+    text = re.sub(r"[\s.-]", "", str(value or "").strip().upper())
+    text = re.sub(r"[^A-Z0-9?@#*]", "?", text)
+    prefix = IDENTIFIER_PREFIXES.get(field, "")
+    if prefix and text.startswith(prefix):
+        text = text[len(prefix):]
+    return text
+
+
+def identifier_similarity(left, right, field):
+    """Compare engine/chassis serials independently of their field prefixes."""
+    return edit_similarity(
+        normalize_identifier(left, field),
+        normalize_identifier(right, field),
+        ocr_aware=True,
+    )
 
 
 def field_similarity(left, right, field):
@@ -597,6 +621,189 @@ def print_metrics(ranked_results, query_rows, reference_rows, label):
         f"top-3 recall={top3 / denominator:.1%}, "
         f"auto-match precision={auto_correct / auto_denominator:.1%}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Value-level similarity (used by source_api.py  POST /api/similar)
+#
+# "Which of the values stored in ONE column of THIS database look like the
+# noisy value that was typed / scanned?"  This is similarity matching only.
+# Deciding which records across databases are the same vehicle (entity
+# matching) is the Coordinator's job, not this module's.
+#
+# Moved here from coordinator/federated_sql.py so every source laptop can run
+# it next to its own data.
+# ---------------------------------------------------------------------------
+VALUE_KINDS = ("plate", "code", "name", "text")
+VALUE_MIN_SCORE = 0.60      # "good" match (same as REVIEW_SCORE)
+VALUE_MAX_MATCHES = 25
+VALUE_FALLBACK_N = 5        # nothing good -> return this many closest values ...
+VALUE_FLOOR = 0.25          # ... if they score at least this (low_confidence)
+VALUE_BLOCK_SIZE = 300      # candidates kept by the cheap bigram pre-filter
+
+
+def _value_bigrams(text):
+    return {text[i:i + 2] for i in range(len(text) - 1)}
+
+
+def _alnum(value):
+    return re.sub(r"[^a-z0-9]", "", str(value or "").casefold())
+
+
+def _tokens(value):
+    return re.findall(r"[a-z0-9]+", str(value or "").casefold())
+
+
+def _code_key(value):
+    return re.sub(r"[^A-Z0-9?@#*]", "", str(value or "").upper())
+
+
+def containment_score(query, candidate):
+    """Partial input: 'UP09' inside 'UP09AI8815', 'rajat' inside 'rajatsharma'."""
+    if len(query) < 2 or query not in candidate:
+        return 0.0
+    score = 0.70 + 0.30 * len(query) / len(candidate)
+    if candidate.startswith(query):
+        score += 0.05
+    return min(score, 0.99)
+
+
+def token_score(query, candidate):
+    """Word-order independent, partial-name tolerant ('sharma, rajt' ~ 'Rajat Sharma')."""
+    query_tokens, candidate_tokens = _tokens(query), _tokens(candidate)
+    if not query_tokens or not candidate_tokens:
+        return 0.0
+    best = [
+        max(
+            SequenceMatcher(None, left, right, autojunk=False).ratio()
+            for right in candidate_tokens
+        )
+        for left in query_tokens
+    ]
+    coverage = 0.85 + 0.15 * min(1.0, len(query_tokens) / len(candidate_tokens))
+    return (sum(best) / len(best)) * coverage
+
+
+def value_similarity(kind, query, candidate):
+    """Similarity 0..1 between the typed value and ONE stored value.
+
+    kind: plate = OCR-aware plate matcher
+          code  = OCR-aware edit distance (engine / chassis / policy numbers)
+          name  = token based, any word order, partial names
+          text  = general text similarity
+    """
+    if kind == "plate":
+        left, right = normalize_plate(query), normalize_plate(candidate)
+        if not left or not right:
+            return 0.0
+        score = max(plate_similarity(left, right), plate_similarity(right, left))
+        return max(
+            score,
+            containment_score(fold_lookalikes(left), fold_lookalikes(right)),
+        )
+
+    left, right = _alnum(query), _alnum(candidate)
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    if kind == "code":
+        left_code, right_code = _code_key(query), _code_key(candidate)
+        return max(
+            edit_similarity(left_code, right_code, ocr_aware=True),
+            containment_score(
+                fold_lookalikes(left_code), fold_lookalikes(right_code)
+            ),
+        )
+    score = max(
+        SequenceMatcher(None, left, right, autojunk=False).ratio(),
+        containment_score(left, right),
+    )
+    if kind in ("name", "text"):
+        score = max(score, token_score(query, candidate))
+    return score
+
+
+def is_exact_value(kind, query, candidate):
+    if kind == "plate":
+        key = normalize_plate(query)
+        return bool(key) and key == normalize_plate(candidate)
+    key = _alnum(query)
+    return bool(key) and key == _alnum(candidate)
+
+
+def _block_key(kind):
+    if kind == "plate":
+        return lambda value: fold_lookalikes(normalize_plate(value))
+    if kind == "code":
+        return lambda value: fold_lookalikes(re.sub(r"[^A-Z0-9]", "", str(value).upper()))
+    return _alnum
+
+
+def match_value(
+    kind,
+    query,
+    stored,
+    min_score=VALUE_MIN_SCORE,
+    max_matches=VALUE_MAX_MATCHES,
+    fallback_n=VALUE_FALLBACK_N,
+    floor=VALUE_FLOOR,
+    block_size=VALUE_BLOCK_SIZE,
+):
+    """Find the stored values that best match `query`.
+
+    * exact (normalised) hit      -> returned alone, score 1.0
+    * score >= min_score          -> all of them, best first
+    * nothing that good           -> closest `fallback_n` values scoring at
+                                     least `floor`, flagged low_confidence
+    Large columns are first narrowed with a cheap look-alike-folded bigram
+    filter (plus every value that contains the typed text).
+
+    Returns {"exact", "low_confidence", "scanned", "matches": [(value, score)]}.
+    """
+    if kind not in VALUE_KINDS:
+        raise ValueError(f"Unknown similarity kind: {kind!r}")
+    stored = [value for value in stored if value is not None and str(value) != ""]
+    query = str(query or "").strip()
+    if not query or not stored:
+        return {"exact": False, "low_confidence": False,
+                "scanned": len(stored), "matches": []}
+
+    exact = [value for value in stored if is_exact_value(kind, query, value)]
+    if exact:
+        return {"exact": True, "low_confidence": False, "scanned": len(stored),
+                "matches": [(value, 1.0) for value in exact[:max_matches]]}
+
+    pool = stored
+    limit = block_size if kind in ("plate", "code") else block_size * 4
+    if len(stored) > limit:
+        key_of = _block_key(kind)
+        query_key = key_of(query)
+        query_grams = _value_bigrams(query_key)
+        keyed = [(value, key_of(value)) for value in stored]
+
+        def jaccard(item):
+            grams = _value_bigrams(item[1])
+            return len(query_grams & grams) / (len(query_grams | grams) or 1)
+
+        ranked = [value for value, _key in heapq.nlargest(limit, keyed, key=jaccard)]
+        contains = [
+            value for value, key in keyed
+            if len(query_key) >= 2 and query_key in key
+        ]
+        pool = list(dict.fromkeys(ranked + contains))
+
+    scored = sorted(
+        ((value, round(value_similarity(kind, query, value), 4)) for value in pool),
+        key=lambda item: (-item[1], str(item[0])),
+    )
+    good = [item for item in scored if item[1] >= min_score]
+    if good:
+        return {"exact": False, "low_confidence": False,
+                "scanned": len(stored), "matches": good[:max_matches]}
+    near = [item for item in scored[:fallback_n] if item[1] >= floor and item[1] > 0]
+    return {"exact": False, "low_confidence": bool(near),
+            "scanned": len(stored), "matches": near}
 
 
 def main():

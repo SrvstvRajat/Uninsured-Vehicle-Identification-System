@@ -2,93 +2,54 @@
 Federated Vehicle Integration - Mediator
 
 Architecture:
-    User Query
+    User Query (noisy / OCR plate, optional details)
         |
         v
-    Mediator
-        |
-        +--> Vehicle Registration DB
-        +--> Insurance DB
-        +--> RTO DB
-        +--> Theft DB
+    Mediator ----- POST /api/similar ----> Vehicle Registration API  \\
+        |    ----- POST /api/similar ----> Insurance API              |  SIMILARITY
+        |    ----- POST /api/similar ----> RTO API                    |  MATCHING
+        |    ----- POST /api/similar ----> Theft API                 /   (on each source)
+        v
+    ENTITY MATCHING (detail_match.py): which records across the four
+    sources are the same vehicle?
         |
         v
-    Runtime integration -> Vehicle 360° -> Decision
+    Vehicle 360 -> Decision
 
-Unlike the previous materialized implementation, this module does NOT
-build or read vehicle_master.pkl. Data stays in the source databases and
-is fetched when a vehicle is queried.
+Similarity matching runs on each source laptop, next to its data; only the
+best candidates (with scores and their rows) travel to the Coordinator. The
+Coordinator links those records into vehicles and decides.
+
+The Coordinator opens NO MySQL connection to the source laptops: every call
+goes through source_client.py (the sources' REST APIs). No vehicle master is
+built or stored; everything is fetched per request and discarded.
 """
 
+from __future__ import annotations
+
 import re
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
-from typing import Any, Optional, Tuple
+from datetime import date, datetime
+from typing import Any, Optional
 
-import mysql.connector
+import detail_match
+from config import SOURCE_NAMES
+from detail_match import (best_anchor, build_entities, decide, rank_entities,
+                          symmetric_plate_score)
+from fuzzy_match import fold_lookalikes
+from source_client import (api_query_dicts, health, plate_column,
+                           similar)
 
-from config import DB_CONFIGS, SOURCE_NAMES
-
-
-def check_source_status() -> dict:
-    """Check whether each live source database accepts a connection."""
-    source_names = ("vehicles", "insurance", "rto", "theft")
-
-    def check_one(source_name):
-        conn = None
-        checked_at = datetime.now().isoformat(timespec="seconds")
-        try:
-            conn = mysql.connector.connect(**DB_CONFIGS[source_name])
-            return {
-                "available": conn.is_connected(),
-                "source": SOURCE_NAMES[source_name],
-                "checked_at": checked_at,
-                "error": None,
-            }
-        except Exception as exc:
-            print(f"[mediator] {source_name} database health check failed: {exc}")
-            return {
-                "available": False,
-                "source": SOURCE_NAMES[source_name],
-                "checked_at": checked_at,
-                "error": str(exc),
-            }
-        finally:
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception as exc:
-                    print(f"[mediator] {source_name} database health connection close failed: {exc}")
-
-    with ThreadPoolExecutor(max_workers=len(source_names)) as executor:
-        return dict(zip(source_names, executor.map(check_one, source_names)))
-
-
-SOURCE_QUERIES = {
-    "vehicles": {
-        "table": "vehicles",
-        "key_column": "reg_plate",
-        "columns": "*",
-    },
-    "insurance": {
-        "table": "insurance_policies",
-        "key_column": "vehicle_number",
-        "columns": "*",
-        "order_by": "policy_end_date DESC",
-    },
-    "rto": {
-        "table": "rto_records",
-        "key_column": "car_id",
-        "columns": "*",
-        "order_by": "registration_date DESC",
-    },
-    "theft": {
-        "table": "theft_records",
-        "key_column": "plate_no",
-        "columns": "*",
-        "order_by": "theft_date DESC",
-    },
-}
+SOURCES = ("vehicles", "insurance", "rto", "theft")
+CANDIDATES_PER_SOURCE = 10     # similar plates asked from each source
+MAX_QUERY_VARIANTS = 6         # corrected readings sent per lookup
+DETAIL_SEED_FIELDS = (         # identifiers that can find a vehicle without a plate
+    ("vehicles", "chassis_no"), ("vehicles", "engine_no"),
+    ("insurance", "policy_no"), ("vehicles", "owner_name"),
+)
+FUZZY_LINK_TRUST_PENALTY = 10  # per record linked by similarity, not exact plate
+MAX_CONTEXT_LOOKUPS = 20       # registered-plate neighbourhoods fetched per lookup
 
 
 def normalize_plate(raw: Any) -> Optional[str]:
@@ -101,136 +62,232 @@ def normalize_plate(raw: Any) -> Optional[str]:
     return re.sub(r"[\s\-]", "", value).upper()
 
 
-def _normalized_sql(column: str) -> str:
+def _status(source: str, available: bool, error: Optional[str],
+            record_found: bool = False, checked_at: Optional[str] = None) -> dict:
+    return {
+        "available": available,
+        "source": SOURCE_NAMES.get(source, source),
+        "checked_at": checked_at or datetime.now().isoformat(timespec="seconds"),
+        "error": error,
+        "record_found": record_found,
+    }
+
+
+def check_source_status() -> dict:
+    """Database reachability of each source, via its REST API /api/health."""
+    def check_one(source):
+        result = health(source)
+        if not result["available"]:
+            print(f"[mediator] {source} health check failed: {result['error']}")
+        return _status(source, result["available"], result["error"],
+                       checked_at=result["checked_at"])
+
+    with ThreadPoolExecutor(max_workers=len(SOURCES)) as pool:
+        return dict(zip(SOURCES, pool.map(check_one, SOURCES)))
+
+
+# --------------------------------------------------------------------------
+# Similarity matching: ask every source, in parallel
+# --------------------------------------------------------------------------
+def _as_keys(queries) -> list[str]:
+    queries = [queries] if isinstance(queries, str) else list(queries or [])
+    keys = []
+    for query in queries:
+        key = normalize_plate(query)
+        if key and key not in keys:
+            keys.append(key)
+    return keys[:MAX_QUERY_VARIANTS]
+
+
+def find_candidates(queries, limit: int = CANDIDATES_PER_SOURCE):
+    """Send the plate (and its corrected variants) to every source's /api/similar.
+
+    Returns (per_source, source_status):
+        per_source[source] = {"available", "error", "matches": [...]}
+    where each stored value keeps its best score over all variants.
     """
-    MySQL expression used for query-time identifier resolution.
+    keys = _as_keys(queries)
+    jobs = [(source, key) for source in SOURCES for key in keys]
 
-    Examples:
-        DL01AB1004
-        DL 01 AB 1004
-        DL-01-AB-1004
+    def run(job):
+        source, key = job
+        try:
+            return source, similar(source, plate_column(source), key,
+                                   limit=limit, with_rows=True), None
+        except Exception as exc:
+            return source, None, str(exc)
 
-    all match the same canonical key.
+    merged = {s: {"available": False, "error": None, "matches": {}, "via": None}
+              for s in SOURCES}
+    if jobs:
+        with ThreadPoolExecutor(max_workers=min(len(jobs), 16)) as pool:
+            for source, data, error in pool.map(run, jobs):
+                slot = merged[source]
+                if data is None:
+                    slot["error"] = slot["error"] or error
+                    continue
+                slot["available"] = True
+                slot["via"] = data.get("via")
+                for match in data.get("matches") or []:
+                    prev = slot["matches"].get(match["value"])
+                    if prev is None or match["score"] > prev["score"]:
+                        slot["matches"][match["value"]] = match
+
+    per_source, source_status = {}, {}
+    for source, slot in merged.items():
+        matches = sorted(slot["matches"].values(), key=lambda m: -m["score"])
+        available = slot["available"] or not keys
+        per_source[source] = {"available": available,
+                              "error": None if available else slot["error"],
+                              "matches": matches, "via": slot["via"]}
+        source_status[source] = _status(source, available,
+                                        None if available else slot["error"],
+                                        record_found=bool(matches))
+    if keys:
+        _add_registered_neighbours(per_source, keys)
+    return per_source, source_status
+
+
+def _add_registered_neighbours(per_source: dict, keys: list[str]) -> None:
+    """Make sure every record can be linked to ITS OWN registered vehicle.
+
+    A source with no exact hit returns its nearest plates, which may belong to
+    a different registered vehicle than the one asked for (asking for
+    UP09AI8815 can return the theft record of UP09AI8845). Before entity
+    matching links such a record, ask the registration source which registered
+    plates are near the record's plate, so the record is linked to its closest
+    registered vehicle, never just to whatever was asked.
     """
-    return (
-        f"REPLACE(REPLACE(UPPER(COALESCE({column}, '')), ' ', ''), '-', '')"
-    )
+    vehicles = per_source.get("vehicles")
+    if not vehicles or not vehicles["available"]:
+        return
+    registered = {normalize_plate(m["value"]) for m in vehicles["matches"]}
+    orphans = []
+    for source, result in per_source.items():
+        if source == "vehicles":
+            continue
+        for match in result["matches"]:
+            key = normalize_plate(match["value"])
+            if key and key not in registered and key not in orphans:
+                orphans.append(key)
+    orphans = orphans[:MAX_CONTEXT_LOOKUPS]
+    if not orphans:
+        return
+
+    def lookup(key):
+        try:
+            return similar("vehicles", plate_column("vehicles"), key,
+                           limit=5, with_rows=True)
+        except Exception as exc:
+            print(f"[mediator] registered-neighbour lookup for {key} failed: {exc}")
+            return None
+
+    known = {m["value"] for m in vehicles["matches"]}
+    with ThreadPoolExecutor(max_workers=min(len(orphans), 8)) as pool:
+        for data in pool.map(lookup, orphans):
+            for match in (data or {}).get("matches") or []:
+                if match["value"] in known:
+                    continue
+                known.add(match["value"])
+                # Score against what was actually asked, not the orphan plate.
+                score = max(symmetric_plate_score(key, normalize_plate(match["value"]))
+                            for key in keys)
+                vehicles["matches"].append(dict(match, score=round(score, 4)))
 
 
-def fetch_one(source_name: str, plate_key: str) -> Tuple[Optional[dict], dict]:
+def _seed_plates_from_details(details: dict) -> list[str]:
+    """No plate typed: find candidate plates through identifier similarity."""
+    seeds = []
+    for source, column in DETAIL_SEED_FIELDS:
+        value = (details or {}).get(column)
+        if not value:
+            continue
+        try:
+            data = similar(source, column, value, limit=5, with_rows=True)
+        except Exception as exc:
+            print(f"[mediator] seed lookup {source}.{column} failed: {exc}")
+            continue
+        for match in data.get("matches") or []:
+            for row in match.get("rows") or []:
+                key = normalize_plate(row.get(plate_column(source)))
+                if key and key not in seeds:
+                    seeds.append(key)
+    return seeds[:MAX_QUERY_VARIANTS]
+
+
+# --------------------------------------------------------------------------
+# Entity matching + ranking (used by the lookup / scan pages)
+# --------------------------------------------------------------------------
+def identify(queries, details: Optional[dict] = None, limit: int = 5) -> dict:
+    """Similarity on the sources, entity matching here, then a decision.
+
+    Returns {"candidates", "best", "auto", "reason", "used_details",
+             "source_status"}. Candidates keep the UI's item shape
+    (plate, score, plate_score, fields, row) plus sources/links.
     """
-    Query exactly one source for one canonical vehicle key.
+    details = {k: v for k, v in (details or {}).items() if v}
+    keys = _as_keys(queries)
+    has_plate = bool(keys)
+    if not has_plate and details:
+        keys = _seed_plates_from_details(details)
+    if not keys:
+        return {"candidates": [], "best": None, "auto": False,
+                "reason": "Give a plate, or a chassis / engine / policy number "
+                          "or owner name to search by.",
+                "used_details": bool(details), "source_status": {}}
 
-    Returns:
-        (record, source_metadata)
-    """
-    spec = SOURCE_QUERIES[source_name]
-    cfg = DB_CONFIGS[source_name]
-
-    sql = (
-        f"SELECT {spec['columns']} "
-        f"FROM {spec['table']} "
-        f"WHERE {_normalized_sql(spec['key_column'])} = %s"
-    )
-
-    if spec.get("order_by"):
-        sql += f" ORDER BY {spec['order_by']}"
-
-    sql += " LIMIT 1"
-
-    conn = None
-    checked_at = datetime.now().isoformat(timespec="seconds")
-
-    try:
-        conn = mysql.connector.connect(**cfg)
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(sql, (plate_key,))
-        record = cursor.fetchone()
-        cursor.close()
-
-        return record, {
-            "available": True,
-            "source": SOURCE_NAMES[source_name],
-            "checked_at": checked_at,
-            "error": None,
-            "record_found": record is not None,
-        }
-
-    except Exception as exc:
-        return None, {
-            "available": False,
-            "source": SOURCE_NAMES[source_name],
-            "checked_at": checked_at,
-            "error": str(exc),
-            "record_found": False,
-        }
-
-    finally:
-        if conn is not None and conn.is_connected():
-            conn.close()
+    per_source, source_status = find_candidates(keys)
+    available = {s for s, st in source_status.items() if st["available"]}
+    entities = build_entities(per_source)
+    ranked = rank_entities(entities, details, available,
+                           has_plate=has_plate, limit=limit)
+    best, auto, reason = decide(ranked, used_details=bool(details))
+    return {"candidates": ranked, "best": best, "auto": auto, "reason": reason,
+            "used_details": bool(details), "source_status": source_status}
 
 
-def query_vehicle(plate_input: str) -> dict:
-    """
-    Federated Vehicle 360 query.
+def similar_plates(queries, limit: int = 5) -> list[dict]:
+    """Registered-plate suggestions for a noisy plate (cleaning workbench)."""
+    per_source, _ = find_candidates(queries, limit=limit)
+    best = {}
+    for result in per_source.values():
+        for match in result["matches"]:
+            key = normalize_plate(match["value"])
+            if key and match["score"] > best.get(key, -1):
+                best[key] = match["score"]
+    return [{"value": k, "score": s}
+            for k, s in sorted(best.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]]
 
-    The mediator sends the same logical vehicle key to all independent
-    source databases, receives source-specific records, resolves the
-    different identifier names at the integration layer, and creates
-    one virtual result.
 
-    No integrated master is persisted.
-    """
-    key = normalize_plate(plate_input)
+def similar_field_values(column: str, value: str, limit: int = 5) -> list[dict]:
+    """Similar registration-DB values for one field (cleaning workbench)."""
+    data = similar("vehicles", column, value, limit=limit)
+    return [{"value": m["value"], "score": m["score"]} for m in data.get("matches") or []]
 
-    if key is None:
-        return {
-            "plate": plate_input,
-            "found": False,
-            "message": "Please provide a vehicle plate number.",
-        }
 
-    records = {}
-    source_status = {}
+# --------------------------------------------------------------------------
+# Vehicle 360 for one plate
+# --------------------------------------------------------------------------
+def _to_date(value) -> Optional[date]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value)[:10])
 
-    # Runtime federation: query each autonomous source independently.
-    for source_name in ("vehicles", "insurance", "rto", "theft"):
-        record, status = fetch_one(source_name, key)
-        records[source_name] = record
-        source_status[source_name] = status
 
-    vehicle = records["vehicles"]
-    insurance = records["insurance"]
-    rto = records["rto"]
-    theft = records["theft"]
-
-    any_record = any(record is not None for record in records.values())
-
-    if not any_record:
-        unavailable = [
-            name for name, status in source_status.items()
-            if not status["available"]
-        ]
-
-        if unavailable:
-            return {
-                "plate": plate_input,
-                "vehicle_key": key,
-                "found": False,
-                "message": (
-                    "No vehicle record could be constructed because the "
-                    f"following source(s) are unavailable: {', '.join(unavailable)}."
-                ),
-                "source_status": source_status,
-            }
-
-        return {
-            "plate": plate_input,
-            "vehicle_key": key,
-            "found": False,
-            "message": "No record found in the federated source databases.",
-            "source_status": source_status,
-        }
+def build_result(plate_input: str, entity: dict, source_status: dict) -> dict:
+    """Integrate one resolved entity into the Vehicle 360 view + decision."""
+    records = entity["records"]
+    vehicle = records.get("vehicles")
+    insurance = records.get("insurance")
+    rto = records.get("rto")
+    theft = records.get("theft")
+    source_status = {
+        s: dict(st, record_found=s in records) for s, st in source_status.items()
+    }
 
     flags = []
     source_warnings = [
@@ -245,23 +302,19 @@ def query_vehicle(plate_input: str) -> dict:
     policy_end = insurance.get("policy_end_date") if insurance else None
 
     is_expired = False
+    policy_end_date = None
     if insurance_available and policy_end:
         try:
-            is_expired = (
-                __import__("pandas").to_datetime(policy_end).date()
-                < __import__("datetime").date.today()
-            )
-        except Exception:
+            policy_end_date = _to_date(policy_end)
+            is_expired = policy_end_date < date.today()
+        except (TypeError, ValueError):
             flags.append("INSURANCE DATE COULD NOT BE VERIFIED")
 
     if insurance_available:
         if not has_policy:
             flags.append("UNINSURED — no policy on record")
         elif is_expired:
-            flags.append(
-                f"INSURANCE EXPIRED on "
-                f"{__import__('pandas').to_datetime(policy_end).date()}"
-            )
+            flags.append(f"INSURANCE EXPIRED on {policy_end_date}")
     else:
         flags.append("INSURANCE DATA COULD NOT BE VERIFIED — source unavailable")
 
@@ -275,15 +328,12 @@ def query_vehicle(plate_input: str) -> dict:
     else:
         flags.append("THEFT/SHREDDING DATA COULD NOT BE VERIFIED — source unavailable")
 
-    # Vehicle-source unavailable takes priority over "anomaly" — we can't
-    # claim the record is genuinely missing if we never got an answer.
+    # Vehicle-source unavailable takes priority over "anomaly".
     if not source_status["vehicles"]["available"]:
         flags.append(
             "VEHICLE REGISTRATION DATA COULD NOT BE VERIFIED — source unavailable"
         )
     elif vehicle is None and rto is not None:
-        # Registration anomaly: RTO knows the vehicle but the main
-        # registration source does not (and we know it's not just down).
         flags.append(
             "DATA QUALITY ANOMALY — RTO record exists but "
             "vehicle registration record is missing"
@@ -311,17 +361,29 @@ def query_vehicle(plate_input: str) -> dict:
     else:
         decision = "OK — INSURED AND CLEAR"
 
-    trust_score = 100 - (20 * len(source_warnings))
+    # Entity-matching evidence: records joined by similarity, not exact plate.
+    entity_links = []
+    link_notes = []
+    for source, link in sorted(entity["links"].items()):
+        entity_links.append({
+            "source": source, "stored_plate": link["value"],
+            "link_score": link["link_score"], "exact": link["exact"],
+        })
+        if not link["exact"]:
+            link_notes.append(
+                f"{SOURCE_NAMES.get(source, source)} record stored under plate "
+                f"'{link['value']}' was linked to {entity['plate']} by similarity "
+                f"({link['link_score']:.0%})."
+            )
 
+    trust_score = 100 - (20 * len(source_warnings))
     if theft_status in {"stolen", "shredded"}:
         trust_score -= 5
-
     if vehicle is None and rto is not None and source_status["vehicles"]["available"]:
         trust_score -= 15
-
+    trust_score -= FUZZY_LINK_TRUST_PENALTY * len(link_notes)
     trust_score = max(0, min(100, trust_score))
 
-    # Resolve the final Vehicle 360 view from the source records.
     plate = (
         vehicle.get("reg_plate") if vehicle
         else rto.get("car_id") if rto
@@ -333,7 +395,7 @@ def query_vehicle(plate_input: str) -> dict:
     return {
         "plate": plate,
         "found": True,
-        "vehicle_key": key,
+        "vehicle_key": entity["plate"],
 
         # Vehicle registration / description
         "make": vehicle.get("make") if vehicle else None,
@@ -366,165 +428,203 @@ def query_vehicle(plate_input: str) -> dict:
         "trust_score": trust_score,
         "source_warnings": source_warnings,
         "flags": flags,
+        "entity_links": entity_links,
+        "link_notes": link_notes,
         "source_status": source_status,
-        "integration_mode": "MEDIATION / FEDERATED VIRTUAL INTEGRATION",
+        "integration_mode": ("MEDIATION / FEDERATED VIRTUAL INTEGRATION — "
+                             "similarity at the sources, entity matching at "
+                             "the coordinator"),
         "queried_at": datetime.now().isoformat(timespec="seconds"),
     }
 
 
-def list_candidate_plates() -> list[str]:
+def query_vehicle(plate_input: str) -> dict:
     """
-    Discover plates for batch reporting.
+    Federated Vehicle 360 query for one plate.
 
-    This is NOT a master-building operation. It only retrieves candidate
-    identifiers from source systems; each vehicle is then queried live
-    through query_vehicle().
+    Every source returns its records whose plate is identical or similar to
+    the given plate. Entity matching links them into vehicles; the vehicle
+    that owns this exact plate (as a registered plate, or as a record's
+    stored plate that was linked to it) is returned.
     """
-    candidates = set()
+    key = normalize_plate(plate_input)
+    if key is None:
+        return {
+            "plate": plate_input,
+            "found": False,
+            "message": "Please provide a vehicle plate number.",
+        }
 
-    for source_name in ("vehicles", "rto", "insurance", "theft"):
-        spec = SOURCE_QUERIES[source_name]
-        cfg = DB_CONFIGS[source_name]
+    per_source, source_status = find_candidates([key])
+    entities = build_entities(per_source)
+    entity = next((e for e in entities if key in e["keys"]), None)
 
-        sql = f"SELECT {spec['key_column']} FROM {spec['table']}"
+    if entity is None:
+        unavailable = [
+            name for name, status in source_status.items()
+            if not status["available"]
+        ]
+        message = (
+            "No vehicle record could be constructed because the following "
+            f"source(s) are unavailable: {', '.join(unavailable)}."
+            if unavailable and not entities
+            else "No record with this plate in the federated source databases."
+        )
+        return {
+            "plate": plate_input,
+            "vehicle_key": key,
+            "found": False,
+            "message": message,
+            "suggestions": [e["plate"] for e in entities[:5]],
+            "source_status": {
+                s: dict(st, record_found=False) for s, st in source_status.items()
+            },
+        }
 
-        conn = None
+    return build_result(plate_input, entity, source_status)
+
+
+# --------------------------------------------------------------------------
+# Batch (nightly report): bulk entity matching over every source
+# --------------------------------------------------------------------------
+BULK_SQL = {
+    "vehicles": "SELECT * FROM vehicles ORDER BY id DESC",
+    "insurance": "SELECT * FROM insurance_policies ORDER BY policy_end_date DESC",
+    "rto": "SELECT * FROM rto_records ORDER BY registration_date DESC",
+    "theft": "SELECT * FROM theft_records ORDER BY theft_date DESC",
+}
+BULK_BLOCK = 30  # anchor plates compared exactly per unmatched record
+
+
+def _bigrams(text: str) -> set:
+    return {text[i:i + 2] for i in range(len(text) - 1)}
+
+
+def bulk_results() -> list[dict]:
+    """Vehicle 360 results for EVERY vehicle known to any source.
+
+    Used by the batch report, where one /api/similar call per plate would be
+    far too slow. Each source is read once; records are grouped by exact
+    plate, then records whose plate is not a registered plate are linked to
+    the closest registered plate with the same rules as build_entities().
+    """
+    def fetch(source):
         try:
-            conn = mysql.connector.connect(**cfg)
-            cursor = conn.cursor()
-            cursor.execute(sql)
+            return source, api_query_dicts(source, BULK_SQL[source]), None
+        except Exception as exc:
+            return source, None, str(exc)
 
-            for (raw_plate,) in cursor.fetchall():
-                key = normalize_plate(raw_plate)
+    with ThreadPoolExecutor(max_workers=len(SOURCES)) as pool:
+        fetched = list(pool.map(fetch, SOURCES))
+
+    source_status = {}
+    groups: dict[str, dict] = {}
+    for source, rows, error in fetched:
+        source_status[source] = _status(source, rows is not None, error)
+        for row in rows or []:
+            key = normalize_plate(row.get(plate_column(source)))
+            if not key:
+                continue
+            entity = groups.setdefault(key, detail_match._new_entity(key))
+            if source in entity["records"]:
+                continue                               # newest row already kept
+            entity["records"][source] = row
+            entity["links"][source] = {"value": row.get(plate_column(source)),
+                                       "query_score": 1.0, "link_score": 1.0,
+                                       "exact": True}
+
+    anchors = {k: e for k, e in groups.items() if "vehicles" in e["records"]}
+    entities = dict(anchors)
+    index: dict[str, set] = {}
+    for key in anchors:
+        for gram in _bigrams(fold_lookalikes(key)):
+            index.setdefault(gram, set()).add(key)
+
+    for key, entity in groups.items():
+        if key in anchors:
+            continue
+        hits = Counter()
+        for gram in _bigrams(fold_lookalikes(key)):
+            hits.update(index.get(gram, ()))
+        block = [k for k, _ in hits.most_common(BULK_BLOCK)]
+        anchor_key, score, margin = best_anchor(key, block)
+        target = anchors.get(anchor_key)
+        if (target is not None and score >= detail_match.LINK_MIN_SCORE
+                and margin >= detail_match.LINK_MIN_MARGIN
+                and not set(entity["records"]) & set(target["records"])):
+            target["keys"] |= entity["keys"]
+            for source, row in entity["records"].items():
+                target["records"][source] = row
+                link = dict(entity["links"][source])
+                link.update(link_score=round(score, 4), exact=False)
+                target["links"][source] = link
+        else:
+            entities[key] = entity
+
+    return [build_result(key, entity, source_status)
+            for key, entity in sorted(entities.items())]
+
+
+def list_candidate_plates() -> list[str]:
+    """Every plate known to any source (read through the REST APIs)."""
+    candidates = set()
+    for source in SOURCES:
+        column = plate_column(source)
+        table = {"vehicles": "vehicles", "insurance": "insurance_policies",
+                 "rto": "rto_records", "theft": "theft_records"}[source]
+        try:
+            for row in api_query_dicts(source, f"SELECT {column} FROM {table}"):
+                key = normalize_plate(row.get(column))
                 if key:
                     candidates.add(key)
-
-            cursor.close()
-
         except Exception:
-            # Batch reporting can continue with the sources that are
-            # available; individual vehicle queries still expose source
-            # availability in their result.
-            continue
-
-        finally:
-            if conn is not None and conn.is_connected():
-                conn.close()
-
+            continue                    # use the sources that are available
     return sorted(candidates)
 
 
-def _fetch_rows(source_name: str, sql: str) -> Optional[list]:
-    """Run one read-only query on one source; None means the source is down."""
-    conn = None
-    try:
-        conn = mysql.connector.connect(**DB_CONFIGS[source_name])
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(sql)
-        rows = cursor.fetchall()
-        cursor.close()
-        return rows
-    except Exception:
-        return None
-    finally:
-        if conn is not None and conn.is_connected():
-            conn.close()
+# --------------------------------------------------------------------------
+# Dropdown values for the detail form (distinct values only, never rows)
+# --------------------------------------------------------------------------
+OPTION_QUERIES = (
+    ("vehicles", "SELECT DISTINCT make, model FROM vehicles"),
+    ("vehicles", "SELECT DISTINCT color FROM vehicles"),
+    ("vehicles", "SELECT DISTINCT owner_name FROM vehicles LIMIT 5000"),
+    ("insurance", "SELECT DISTINCT insurer_name FROM insurance_policies"),
+    ("rto", "SELECT DISTINCT rto_office FROM rto_records"),
+    ("rto", "SELECT DISTINCT YEAR(registration_date) AS registration_year "
+            "FROM rto_records"),
+    ("theft", "SELECT DISTINCT YEAR(theft_date) AS theft_year FROM theft_records"),
+)
 
 
-def list_vehicle_profiles() -> list[dict]:
-    """
-    One descriptive profile per plate, assembled live from all four sources.
-
-    Used by the UI to match a partial plate together with operator-supplied
-    details (registration, insurance, RTO and theft fields). Like
-    list_candidate_plates() this does NOT build a master table: rows are read
-    per request and discarded.
-
-    A field is left as None when its source is unreachable (no evidence, no
-    penalty). When a source IS reachable but has no record for a plate the
-    field holds an explicit "No ..." marker, so a detail such as
-    "insurer = HDFC" correctly contradicts an uninsured vehicle.
-    """
-    today = datetime.now().date().isoformat()
-    profiles: dict[str, dict] = {}
-
-    def profile(plate):
-        key = normalize_plate(plate)
-        if not key:
+def field_option_values() -> tuple[dict, dict, bool]:
+    """(values_by_field, models_by_make, any_source_answered)."""
+    def run(job):
+        source, sql = job
+        try:
+            return api_query_dicts(source, sql)
+        except Exception:
             return None
-        return profiles.setdefault(key, {"reg_plate": key})
 
-    vehicles = _fetch_rows(
-        "vehicles",
-        "SELECT reg_plate, make, model, color, owner_name, engine_no, "
-        "chassis_no FROM vehicles",
-    )
-    insurance = _fetch_rows(
-        "insurance",
-        "SELECT vehicle_number, insurer_name, policy_no, policy_end_date "
-        "FROM insurance_policies ORDER BY policy_end_date DESC",
-    )
-    rto = _fetch_rows(
-        "rto",
-        "SELECT car_id, registration_date, renewal_date, rto_office "
-        "FROM rto_records ORDER BY registration_date DESC",
-    )
-    theft = _fetch_rows(
-        "theft",
-        "SELECT plate_no, theft_date, status FROM theft_records "
-        "ORDER BY theft_date DESC",
-    )
+    with ThreadPoolExecutor(max_workers=len(OPTION_QUERIES)) as pool:
+        results = list(pool.map(run, OPTION_QUERIES))
 
-    for row in vehicles or []:
-        p = profile(row["reg_plate"])
-        if p is not None:
-            for f in ("make", "model", "color", "owner_name",
-                      "engine_no", "chassis_no"):
-                p[f] = row.get(f)
-
-    seen = set()
-    for row in insurance or []:
-        p = profile(row["vehicle_number"])
-        if p is None or p["reg_plate"] in seen:
-            continue                      # newest policy per plate only
-        seen.add(p["reg_plate"])
-        end = str(row.get("policy_end_date") or "")[:10]
-        p["insurer_name"] = row.get("insurer_name")
-        p["policy_no"] = row.get("policy_no")
-        p["policy_status"] = "Active" if end and end >= today else "Expired"
-
-    seen = set()
-    for row in rto or []:
-        p = profile(row["car_id"])
-        if p is None or p["reg_plate"] in seen:
+    values: dict[str, set] = {}
+    models: dict[str, set] = {}
+    answered = False
+    for rows in results:
+        if rows is None:
             continue
-        seen.add(p["reg_plate"])
-        renewal = str(row.get("renewal_date") or "")[:10]
-        p["rto_office"] = row.get("rto_office")
-        p["registration_year"] = str(row.get("registration_date") or "")[:4] or None
-        p["renewal_status"] = "Valid" if renewal and renewal >= today else "Lapsed"
-
-    seen = set()
-    for row in theft or []:
-        p = profile(row["plate_no"])
-        if p is None or p["reg_plate"] in seen:
-            continue
-        seen.add(p["reg_plate"])
-        p["theft_status"] = str(row.get("status") or "").strip().capitalize() or None
-        p["theft_year"] = str(row.get("theft_date") or "")[:4] or None
-
-    # Explicit "no record" markers, only for sources that actually answered.
-    for p in profiles.values():
-        if insurance is not None and "policy_status" not in p:
-            p.update(insurer_name="No policy", policy_no="No policy",
-                     policy_status="No policy")
-        if rto is not None and "rto_office" not in p:
-            p.update(rto_office="No RTO record", registration_year="No RTO record",
-                     renewal_status="No RTO record")
-        if theft is not None and "theft_status" not in p:
-            p.update(theft_status="No theft record", theft_year="No theft record")
-
-    return list(profiles.values())
+        answered = True
+        for row in rows:
+            for field, value in row.items():
+                text = str(value).strip() if value is not None else ""
+                if text:
+                    values.setdefault(field, set()).add(text)
+            make, model = row.get("make"), row.get("model")
+            if make and model:
+                models.setdefault(str(make).strip(), set()).add(str(model).strip())
+    return values, models, answered
 
 
 if __name__ == "__main__":

@@ -1,19 +1,21 @@
-# """
-# Generate a Ministry of Transport report using federated queries.
+"""
+Generate a Ministry of Transport report using federated queries.
 
-# No vehicle_master.pkl is used. Candidate vehicle identifiers are collected
-# from the independent source systems, and every candidate is evaluated by the
-# mediator at runtime.
-# """
+No vehicle_master.pkl is used. Each source database is read once through its
+REST API; records are grouped by plate and records stored under a slightly
+different plate are linked to the registered vehicle by entity matching
+(mediator.bulk_results). Every resulting vehicle gets the same decision logic
+as a live lookup, and flagged vehicles are written to ministry_report.csv and
+mot_db.mot_reports.
+"""
 
 import csv
 from datetime import date
 
 import mysql.connector
 
-# from config import DB_CONFIGS
-# from mediator import list_candidate_plates, query_vehicle
-
+from config import DB_CONFIGS
+from mediator import bulk_results
 
 OUTPUT_CSV = "ministry_report.csv"
 OUTPUT_COLUMNS = [
@@ -22,10 +24,24 @@ OUTPUT_COLUMNS = [
     "flag_reason",
     "reported_by",
 ]
+CLEAR_DECISION = "OK — INSURED AND CLEAR"
+REPORTED_BY = "federated-integration-engine"
+
+
+def _already_reported_today(cursor, plate: str, reason: str) -> bool:
+    cursor.execute(
+        """
+        SELECT 1 FROM mot_reports
+        WHERE vehicle_plate = %s AND flag_reason = %s AND report_date = %s
+        LIMIT 1
+        """,
+        (plate, reason, date.today()),
+    )
+    return cursor.fetchone() is not None
 
 
 def write_to_mot_row(cursor, row: dict) -> None:
-    """Insert one flagged row into the Ministry database immediately."""
+    """Insert one flagged row into the Ministry database."""
     cursor.execute(
         """
         INSERT INTO mot_reports
@@ -42,46 +58,53 @@ def write_to_mot_row(cursor, row: dict) -> None:
 
 
 def generate_ministry_report() -> None:
-    plates = list_candidate_plates()
-    flag_count = 0
-
-    print(f"Found {len(plates)} candidate vehicle identifiers.")
+    results = bulk_results()
+    print(f"Evaluated {len(results)} vehicles (entity-matched across sources).")
 
     conn = None
     cursor = None
+    try:
+        conn = mysql.connector.connect(**DB_CONFIGS["mot"])
+        cursor = conn.cursor()
+    except Exception as exc:
+        print(f"[report] mot_db unavailable, writing CSV only: {exc}")
 
-#             print(f"{flag_count} flags written to {OUTPUT_CSV}")
-
+    flag_count = 0
+    inserted = 0
+    try:
         with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as csv_file:
             writer = csv.DictWriter(csv_file, fieldnames=OUTPUT_COLUMNS)
             writer.writeheader()
 
-            for plate in plates:
-                result = query_vehicle(plate)
+            for result in results:
+                if result.get("decision") == CLEAR_DECISION:
+                    continue
+                plate = result.get("vehicle_key") or result.get("plate")
+                reasons = result.get("flags") or [result.get("decision")]
 
-                if result.get("decision") != "OK — INSURED AND CLEAR":
-                    reasons = result.get("flags") or [result.get("decision")]
+                for reason in reasons:
+                    row = {
+                        "vehicle_plate": plate,
+                        "report_date": date.today(),
+                        "flag_reason": reason,
+                        "reported_by": REPORTED_BY,
+                    }
+                    writer.writerow(row)
+                    flag_count += 1
 
-                    for reason in reasons:
-                        row = {
-                            "vehicle_plate": plate,
-                            "report_date": date.today(),
-                            "flag_reason": reason,
-                            "reported_by": "federated-integration-engine",
-                        }
-                        writer.writerow(row)
-                        csv_file.flush()
-
+                    if cursor is not None and not _already_reported_today(
+                        cursor, plate, reason
+                    ):
                         write_to_mot_row(cursor, row)
-                        conn.commit()
-                        flag_count += 1
+                        inserted += 1
 
-            print(f"{flag_count} flags written to {OUTPUT_CSV}")
+                if cursor is not None:
+                    conn.commit()
 
-        if flag_count:
-            print("Report written to mot_db.mot_reports as rows are generated.")
-        else:
-            print("No flagged vehicles. Nothing inserted into mot_db.")
+        print(f"{flag_count} flags written to {OUTPUT_CSV}")
+        if cursor is not None:
+            print(f"{inserted} new rows written to mot_db.mot_reports "
+                  "(flags already reported today were skipped).")
 
     finally:
         if cursor is not None:
