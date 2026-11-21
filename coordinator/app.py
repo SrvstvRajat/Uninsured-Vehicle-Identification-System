@@ -1509,6 +1509,8 @@ from plate_correct import correct_plate  # position-aware plate correction
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = MAX_IMAGE_BYTES + 1024 * 1024
 app.register_blueprint(sql_bp)          # <-- NEW: adds /sql and /sql/run
+from context_page import context_bp     # Phase 3: context discovery + documents
+app.register_blueprint(context_bp)      # adds /context and /context/api
 
 TEMPLATE = """
 <!doctype html>

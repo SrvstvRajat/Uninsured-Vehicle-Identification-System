@@ -1,0 +1,292 @@
+transfer_id,vehicle_id,from_owner_id,to_owner_id,transfer_date,remarks
+1,60,1310,508,2020-12-06,Sold to relative
+2,596,1311,1312,2021-05-23,Sold to relative
+3,596,1312,39,2023-04-06,Transfer after relocation
+4,549,1313,1314,2018-05-18,Sold through dealer
+5,549,1314,1031,2019-10-19,Private sale
+6,1040,1315,479,2021-07-03,Transfer after relocation
+7,441,1316,814,2019-07-17,Sold to relative
+8,838,1317,538,2021-02-23,Resale after loan closure
+9,125,1318,574,2019-01-01,Sold to relative
+10,1152,1319,841,2019-03-05,Private sale
+11,662,1320,1321,2018-06-09,Sold through dealer
+12,662,1321,1156,2019-05-15,Resale after loan closure
+13,536,1322,455,2021-02-21,Transfer after relocation
+14,1383,1323,1324,2021-07-21,Sold to relative
+15,1383,1324,1065,2022-07-02,Transfer after relocation
+16,651,1325,181,2021-08-28,Sold to relative
+17,843,1326,703,2019-03-14,Resale after loan closure
+18,802,1327,1328,2021-04-15,Sold to relative
+19,802,1328,28,2022-10-03,Sold through dealer
+20,906,1329,1330,2018-03-31,Sold to relative
+21,906,1330,697,2019-07-24,Sold through dealer
+22,871,1331,1332,2020-01-27,Sold through dealer
+23,871,1332,71,2022-05-03,Private sale
+24,817,1333,1334,2022-10-13,Private sale
+25,817,1334,1234,2025-03-01,Resale after loan closure
+26,534,1335,532,2020-11-23,Sold through dealer
+27,112,1336,617,2018-10-30,Sold to relative
+28,550,1337,499,2020-04-18,Private sale
+29,995,1338,1339,2018-06-30,Sold through dealer
+30,995,1339,1304,2019-04-18,Private sale
+31,1492,1340,329,2019-03-22,Sold to relative
+32,449,1341,728,2019-09-28,Sold through dealer
+33,696,1342,1343,2019-08-28,Sold to relative
+34,696,1343,63,2021-06-08,Sold to relative
+35,1304,1344,1051,2018-03-17,Resale after loan closure
+36,94,1345,716,2021-08-16,Sold to relative
+37,632,1346,1282,2019-03-23,Transfer after relocation
+38,917,1347,193,2021-04-16,Sold to relative
+39,840,1348,837,2022-11-16,Sold through dealer
+40,454,1349,1085,2020-01-04,Sold to relative
+41,1173,1350,925,2022-02-05,Transfer after relocation
+42,342,1351,1352,2022-04-12,Resale after loan closure
+43,342,1352,780,2023-02-16,Transfer after relocation
+44,1098,1353,1354,2018-09-24,Sold to relative
+45,1098,1354,744,2019-06-06,Sold through dealer
+46,423,1355,1356,2018-12-19,Sold to relative
+47,423,1356,733,2020-05-16,Sold through dealer
+48,1281,1357,1070,2021-11-03,Resale after loan closure
+49,226,1358,230,2021-12-02,Private sale
+50,1257,1359,687,2018-09-21,Sold to relative
+51,1251,1360,1008,2020-12-29,Sold through dealer
+52,676,1361,828,2020-01-26,Sold to relative
+53,265,1362,796,2020-10-20,Private sale
+54,1239,1363,918,2020-05-21,Private sale
+55,1106,1364,386,2019-01-03,Private sale
+56,41,1365,167,2021-11-06,Sold through dealer
+57,1480,1366,1367,2020-05-15,Sold through dealer
+58,1480,1367,755,2021-10-07,Transfer after relocation
+59,44,1368,1369,2022-05-28,Private sale
+60,44,1369,134,2024-02-21,Resale after loan closure
+61,777,1370,1371,2019-07-31,Sold through dealer
+62,777,1371,257,2020-06-19,Transfer after relocation
+63,185,1372,534,2021-10-14,Sold to relative
+64,1444,1373,715,2020-07-03,Sold to relative
+65,683,1374,588,2022-02-21,Transfer after relocation
+66,723,1375,697,2020-06-01,Sold to relative
+67,1133,1376,1377,2021-06-01,Sold through dealer
+68,1133,1377,1257,2023-01-13,Resale after loan closure
+69,130,1378,701,2019-01-12,Sold to relative
+70,1342,1379,1380,2021-03-20,Transfer after relocation
+71,1342,1380,854,2022-05-14,Transfer after relocation
+72,101,1381,1382,2019-03-01,Sold through dealer
+73,101,1382,1153,2020-11-14,Private sale
+74,1063,1383,453,2018-02-07,Sold to relative
+75,432,1384,111,2021-01-13,Transfer after relocation
+76,742,1385,1386,2020-12-26,Private sale
+77,742,1386,956,2023-06-03,Transfer after relocation
+78,1097,1387,576,2018-06-20,Private sale
+79,407,1388,587,2018-11-16,Resale after loan closure
+80,322,1389,102,2021-02-13,Transfer after relocation
+81,811,1390,221,2020-03-21,Private sale
+82,1471,1391,1392,2021-05-12,Sold to relative
+83,1471,1392,1208,2022-10-21,Sold to relative
+84,470,1393,179,2022-10-26,Transfer after relocation
+85,595,1394,1395,2021-09-05,Private sale
+86,595,1395,1067,2024-02-21,Sold through dealer
+87,331,1396,563,2021-06-21,Private sale
+88,766,1397,354,2019-10-28,Resale after loan closure
+89,679,1398,1032,2018-02-16,Resale after loan closure
+90,847,1399,1019,2020-01-26,Private sale
+91,442,1400,1022,2018-05-13,Sold through dealer
+92,1502,1401,439,2022-06-20,Private sale
+93,510,1402,511,2020-08-04,Sold through dealer
+94,28,1403,1404,2020-06-17,Transfer after relocation
+95,28,1404,55,2021-03-05,Sold to relative
+96,74,1405,1406,2018-10-26,Sold to relative
+97,74,1406,643,2020-12-27,Sold through dealer
+98,42,1407,365,2019-03-07,Sold to relative
+99,1079,1408,1062,2022-03-31,Sold to relative
+100,210,1409,49,2021-03-09,Sold to relative
+101,1028,1410,807,2019-03-29,Sold to relative
+102,815,1411,321,2020-08-31,Transfer after relocation
+103,994,1412,1151,2019-06-11,Private sale
+104,87,1413,1414,2021-08-11,Private sale
+105,87,1414,1228,2023-10-21,Resale after loan closure
+106,580,1415,115,2020-09-14,Private sale
+107,618,1416,1417,2021-08-24,Private sale
+108,618,1417,655,2023-03-12,Transfer after relocation
+109,50,1418,902,2020-01-15,Sold through dealer
+110,472,1419,1124,2020-07-03,Resale after loan closure
+111,1294,1420,533,2021-11-13,Transfer after relocation
+112,1410,1421,67,2022-03-02,Private sale
+113,507,1422,1423,2019-10-16,Sold through dealer
+114,507,1423,551,2020-11-20,Transfer after relocation
+115,70,1424,292,2019-09-07,Resale after loan closure
+116,558,1425,518,2018-01-02,Sold to relative
+117,254,1426,666,2019-08-05,Sold to relative
+118,774,1427,1428,2020-11-09,Transfer after relocation
+119,774,1428,522,2022-10-17,Private sale
+120,1343,1429,433,2021-07-30,Resale after loan closure
+121,821,1430,466,2019-09-18,Sold to relative
+122,269,1431,608,2019-10-26,Private sale
+123,553,1432,1433,2019-04-14,Sold to relative
+124,553,1433,850,2021-02-25,Sold to relative
+125,174,1434,953,2019-09-23,Transfer after relocation
+126,157,1435,1111,2020-04-17,Sold to relative
+127,152,1436,1437,2019-10-22,Transfer after relocation
+128,152,1437,819,2021-06-04,Sold to relative
+129,1034,1438,202,2018-08-07,Sold through dealer
+130,1479,1439,360,2022-05-19,Transfer after relocation
+131,1441,1440,245,2021-08-02,Sold to relative
+132,1501,1441,437,2022-03-16,Sold through dealer
+133,851,1442,1443,2020-06-16,Private sale
+134,851,1443,608,2021-12-03,Resale after loan closure
+135,31,1444,1445,2022-03-11,Private sale
+136,31,1445,259,2023-04-03,Sold to relative
+137,1110,1446,410,2021-05-21,Sold through dealer
+138,311,1447,527,2022-08-31,Resale after loan closure
+139,196,1448,1449,2021-03-23,Sold to relative
+140,196,1449,516,2023-07-20,Sold through dealer
+141,1510,1450,436,2022-09-30,Sold through dealer
+142,1205,1451,1452,2018-05-30,Private sale
+143,1205,1452,593,2020-10-09,Resale after loan closure
+144,398,1453,1127,2018-01-14,Resale after loan closure
+145,1241,1454,678,2022-10-19,Private sale
+146,640,1455,94,2022-01-04,Resale after loan closure
+147,663,1456,260,2018-02-23,Resale after loan closure
+148,1050,1457,1458,2019-09-13,Private sale
+149,1050,1458,103,2021-06-08,Sold to relative
+150,48,1459,1460,2020-02-19,Sold through dealer
+151,48,1460,161,2021-12-07,Transfer after relocation
+152,619,1461,334,2021-03-30,Resale after loan closure
+153,562,1462,1094,2020-04-30,Private sale
+154,940,1463,1464,2022-07-04,Transfer after relocation
+155,940,1464,1095,2024-03-04,Sold through dealer
+156,416,1465,151,2021-12-07,Sold through dealer
+157,205,1466,1059,2018-04-03,Private sale
+158,542,1467,554,2021-11-24,Transfer after relocation
+159,1344,1468,592,2020-05-08,Private sale
+160,1181,1469,1470,2021-07-04,Sold to relative
+161,1181,1470,1041,2022-10-18,Resale after loan closure
+162,966,1471,984,2022-02-14,Private sale
+163,772,1472,688,2019-12-16,Private sale
+164,597,1473,28,2022-10-20,Resale after loan closure
+165,880,1474,244,2019-06-11,Private sale
+166,191,1475,978,2018-09-15,Private sale
+167,456,1476,399,2022-01-08,Transfer after relocation
+168,833,1477,1478,2020-11-24,Resale after loan closure
+169,833,1478,221,2022-03-12,Private sale
+170,1149,1479,1293,2021-07-18,Sold through dealer
+171,571,1480,1481,2020-09-17,Sold to relative
+172,571,1481,821,2021-10-14,Resale after loan closure
+173,990,1482,243,2018-08-30,Sold to relative
+174,583,1483,1484,2022-04-13,Resale after loan closure
+175,583,1484,1251,2023-07-26,Sold through dealer
+176,1440,1485,483,2022-08-27,Sold through dealer
+177,1093,1486,1178,2020-07-15,Transfer after relocation
+178,1038,1487,1488,2022-02-11,Sold to relative
+179,1038,1488,347,2024-02-19,Resale after loan closure
+180,501,1489,1142,2021-11-21,Resale after loan closure
+181,784,1490,291,2021-01-12,Resale after loan closure
+182,36,1491,1492,2018-10-06,Sold to relative
+183,36,1492,116,2019-04-24,Sold through dealer
+184,1018,1493,1494,2022-04-15,Private sale
+185,1018,1494,450,2023-12-06,Private sale
+186,1491,1495,1076,2019-04-09,Sold to relative
+187,807,1496,1497,2021-07-28,Sold through dealer
+188,807,1497,114,2023-07-31,Sold to relative
+189,764,1498,184,2022-08-11,Sold through dealer
+190,1120,1499,1500,2021-07-07,Transfer after relocation
+191,1120,1500,607,2023-04-04,Resale after loan closure
+192,1464,1501,1502,2022-11-16,Transfer after relocation
+193,1464,1502,677,2024-08-19,Transfer after relocation
+194,222,1503,747,2021-09-27,Sold to relative
+195,927,1504,1026,2021-04-25,Transfer after relocation
+196,459,1505,428,2022-11-18,Transfer after relocation
+197,1184,1506,804,2022-04-14,Private sale
+198,51,1507,417,2019-12-13,Transfer after relocation
+199,814,1508,1101,2019-03-19,Resale after loan closure
+200,476,1509,698,2022-02-02,Transfer after relocation
+201,916,1510,384,2020-07-02,Sold through dealer
+202,758,1511,110,2021-02-17,Resale after loan closure
+203,977,1512,852,2022-10-21,Sold through dealer
+204,1154,1513,1064,2022-01-18,Sold through dealer
+205,224,1514,173,2019-02-19,Sold to relative
+206,1317,1515,960,2019-10-24,Sold through dealer
+207,637,1516,762,2021-06-20,Sold through dealer
+208,681,1517,169,2022-01-06,Sold to relative
+209,295,1518,1265,2019-10-26,Private sale
+210,1291,1519,1520,2022-11-28,Private sale
+211,1291,1520,706,2024-09-08,Private sale
+212,172,1521,1175,2020-04-28,Resale after loan closure
+213,347,1522,1523,2020-06-02,Sold to relative
+214,347,1523,888,2021-12-27,Private sale
+215,426,1524,278,2018-07-17,Resale after loan closure
+216,1004,1525,847,2020-08-10,Sold to relative
+217,1216,1526,1527,2019-12-13,Transfer after relocation
+218,1216,1527,830,2020-11-28,Sold through dealer
+219,512,1528,134,2022-01-01,Resale after loan closure
+220,290,1529,903,2021-01-07,Sold to relative
+221,826,1530,267,2021-06-02,Sold through dealer
+222,1263,1531,1229,2022-02-09,Private sale
+223,970,1532,1533,2022-07-07,Transfer after relocation
+224,970,1533,732,2024-02-17,Transfer after relocation
+225,1072,1534,1535,2019-01-13,Sold to relative
+226,1072,1535,1302,2020-09-15,Private sale
+227,1481,1536,1092,2020-12-08,Sold to relative
+228,1161,1537,1538,2019-11-01,Transfer after relocation
+229,1161,1538,736,2021-03-28,Sold through dealer
+230,477,1539,294,2021-01-01,Private sale
+231,121,1540,915,2020-06-21,Private sale
+232,1011,1541,138,2022-07-12,Sold to relative
+233,517,1542,62,2020-10-16,Private sale
+234,844,1543,97,2018-08-27,Resale after loan closure
+235,638,1544,548,2022-06-15,Transfer after relocation
+236,692,1545,238,2020-12-15,Resale after loan closure
+237,309,1546,1547,2021-07-06,Transfer after relocation
+238,309,1547,318,2023-03-11,Transfer after relocation
+239,75,1548,1277,2021-06-02,Transfer after relocation
+240,659,1549,471,2018-07-02,Sold to relative
+241,1412,1550,1551,2019-01-21,Sold to relative
+242,1412,1551,856,2021-02-09,Sold through dealer
+243,1158,1552,1553,2021-12-30,Sold to relative
+244,1158,1553,824,2022-09-30,Private sale
+245,1227,1554,589,2021-11-12,Sold through dealer
+246,12,1555,1154,2020-02-01,Transfer after relocation
+247,1414,1556,1267,2021-10-25,Resale after loan closure
+248,429,1557,648,2022-08-14,Transfer after relocation
+249,1001,1558,662,2018-03-27,Transfer after relocation
+250,1118,1559,1016,2018-11-22,Transfer after relocation
+251,1024,1560,1141,2019-08-07,Resale after loan closure
+252,642,1561,785,2022-08-13,Private sale
+253,1336,1562,933,2020-09-07,Sold through dealer
+254,483,1563,1162,2020-06-11,Resale after loan closure
+255,660,1564,447,2022-04-20,Private sale
+256,945,1565,1566,2020-03-12,Transfer after relocation
+257,945,1566,378,2021-03-03,Sold to relative
+258,1452,1567,948,2022-11-20,Transfer after relocation
+259,1054,1568,1569,2020-04-19,Resale after loan closure
+260,1054,1569,708,2022-05-06,Sold through dealer
+261,1137,1570,1571,2021-02-26,Sold through dealer
+262,1137,1571,806,2022-10-15,Resale after loan closure
+263,167,1572,1573,2021-11-05,Resale after loan closure
+264,167,1573,778,2023-06-24,Transfer after relocation
+265,216,1574,560,2018-11-10,Transfer after relocation
+266,872,1575,1576,2022-07-08,Sold to relative
+267,872,1576,1219,2023-06-20,Sold through dealer
+268,1433,1577,654,2019-03-03,Transfer after relocation
+269,159,1578,1579,2022-01-21,Resale after loan closure
+270,159,1579,1078,2023-03-07,Private sale
+271,770,1580,1581,2020-03-15,Private sale
+272,770,1581,879,2022-01-25,Sold through dealer
+273,261,1582,143,2019-11-23,Resale after loan closure
+274,332,1583,753,2021-11-22,Private sale
+275,1065,1584,715,2021-03-23,Private sale
+276,249,1585,99,2019-10-10,Resale after loan closure
+277,341,1586,139,2018-06-25,Sold through dealer
+278,405,1587,1588,2019-09-22,Sold through dealer
+279,405,1588,1121,2021-04-15,Resale after loan closure
+280,897,1589,1214,2019-09-14,Sold through dealer
+281,233,1590,1114,2021-06-20,Transfer after relocation
+282,80,1591,52,2018-08-21,Private sale
+283,869,1592,304,2020-09-03,Private sale
+284,1015,1593,673,2018-02-10,Transfer after relocation
+285,350,1594,682,2018-10-04,Resale after loan closure
+286,1283,1595,275,2019-08-22,Sold through dealer
+287,1075,1596,790,2020-01-18,Sold to relative
+288,998,1597,423,2018-04-17,Private sale
+289,287,1598,672,2021-09-12,Sold through dealer
+290,1121,1599,392,2020-02-19,Private sale
+291,857,1600,359,2020-01-22,Resale after loan closure

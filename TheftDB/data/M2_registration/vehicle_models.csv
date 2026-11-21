@@ -1,0 +1,19 @@
+model_id,make,model,fuel_type,body_type,seating
+1,hh,ff,Petrol,Hatchback,5
+2,Honda,Amaze,Petrol,Hatchback,5
+3,Honda,City,Petrol,Sedan,5
+4,Hyundai,Baleno,Petrol,Hatchback,5
+5,Hyundai,Creta,Petrol,SUV,5
+6,Hyundai,i20,Petrol,Hatchback,5
+7,Hyundai,Nexon,Petrol,Compact SUV,5
+8,Kia,Seltos,Petrol,SUV,5
+9,Mahindra,XUV700,Diesel,SUV,7
+10,Maruti,Baleno,Petrol,Hatchback,5
+11,Maruti,i20,Petrol,Hatchback,5
+12,Maruti,Swift,Petrol,Hatchback,5
+13,Tata,Creta,Petrol,SUV,5
+14,Tata,Nexon,Petrol,Compact SUV,5
+15,Tata,Punch,Petrol,Hatchback,5
+16,Toyota,Creta,Petrol,SUV,5
+17,Toyota,Innova,Diesel,MPV,7
+18,Toyota,Nexon,Petrol,Compact SUV,5

@@ -48,7 +48,7 @@ from sqlglot import exp
 from config import SOURCE_API_TOKENS, SOURCE_API_URLS
 
 # All REST calls to the source laptops go through source_client.py.
-from source_client import COLUMN_KINDS, api_call as _api_call, similar as _similar
+from source_client import TABLE_KINDS, api_call as _api_call, similar as _similar
 
 # --------------------------------------------------------------------------
 # Settings
@@ -68,6 +68,11 @@ ALLOW_WRITES = os.getenv("SQL_CONSOLE_ALLOW_WRITES", "false").lower() == "true"
 # (thresholds are configured on the source: SOURCE_API_SIMILAR_MIN / _FLOOR).
 FUZZY_DEFAULT = os.getenv("SQL_CONSOLE_FUZZY", "true").lower() == "true"
 FUZZY_MAX_MATCHES = int(os.getenv("SQL_CONSOLE_FUZZY_TOP", "25"))
+# When the best match is strong, keep only matches close to it ('Kumr, Sunita' ->
+# 'Sunita Kumar' 0.94, not every 'X Kumar' at 0.70). Equal-score ties (e.g. an
+# unreadable '@' character in a plate) are still all kept.
+FUZZY_STRONG = 0.85
+FUZZY_RELATIVE_MARGIN = 0.15
 
 
 # --------------------------------------------------------------------------
@@ -124,12 +129,76 @@ TABLES: dict[str, dict] = {
     },
 }
 
+
+# Phase 3: tables added on each source (entity information split out of the hub
+# table, joined by FK -> PK inside each source database). They have no plate
+# column, so plate_key is not available on them; join them to their hub table
+# with the FK columns (e.g. vehicles.owner_id = owners.owner_id).
+# A table that a laptop has not created yet simply returns a source error.
+_P3 = {
+    # registration (M2)
+    "owners": ("vehicles", "vehicle_registration_db", {
+        "owner_id": "I", "full_name": "T", "phone": "T", "email": "T", "address": "T",
+        "city": "T", "date_of_birth": "T"}),
+    "vehicle_models": ("vehicles", "vehicle_registration_db", {
+        "model_id": "I", "make": "T", "model": "T", "fuel_type": "T", "body_type": "T",
+        "seating": "I"}),
+    "dealers": ("vehicles", "vehicle_registration_db", {
+        "dealer_id": "I", "dealer_name": "T", "city": "T", "gstin": "T"}),
+    "ownership_transfers": ("vehicles", "vehicle_registration_db", {
+        "transfer_id": "I", "vehicle_id": "I", "from_owner_id": "I", "to_owner_id": "I",
+        "transfer_date": "T", "remarks": "T"}),
+    # insurance (M3)
+    "customers": ("insurance", "insurance_db", {
+        "customer_id": "I", "customer_name": "T", "phone": "T", "email": "T", "city": "T"}),
+    "agents": ("insurance", "insurance_db", {
+        "agent_id": "I", "agent_name": "T", "phone": "T", "branch_id": "I"}),
+    "branches": ("insurance", "insurance_db", {
+        "branch_id": "I", "insurer_name": "T", "city": "T", "phone": "T"}),
+    "claims": ("insurance", "insurance_db", {
+        "claim_id": "I", "claim_no": "T", "policy_id": "I", "claim_date": "T", "claim_type": "T",
+        "amount": "R", "status": "T", "summary": "T"}),
+    # RTO (M4)
+    "rto_offices": ("rto", "rto_db", {
+        "office_id": "I", "office_code": "T", "office_name": "T", "city": "T", "state": "T"}),
+    "fitness_certificates": ("rto", "rto_db", {
+        "cert_id": "I", "rto_record_id": "I", "issue_date": "T", "expiry_date": "T",
+        "result": "T", "inspector": "T"}),
+    "challans": ("rto", "rto_db", {
+        "challan_id": "I", "rto_record_id": "I", "challan_date": "T", "offence": "T",
+        "location": "T", "fine_amount": "R", "paid": "I"}),
+    "puc_certificates": ("rto", "rto_db", {
+        "puc_id": "I", "rto_record_id": "I", "test_date": "T", "valid_till": "T",
+        "co_level": "R", "result": "T"}),
+    # theft (M5)
+    "police_stations": ("theft", "theft_db", {
+        "station_id": "I", "station_code": "T", "station_name": "T", "city": "T",
+        "phone": "T"}),
+    "firs": ("theft", "theft_db", {
+        "fir_id": "I", "fir_no": "T", "station_id": "I", "filed_on": "T",
+        "complainant_name": "T", "complainant_phone": "T"}),
+    "recoveries": ("theft", "theft_db", {
+        "recovery_id": "I", "theft_id": "I", "recovery_date": "T", "location": "T",
+        "vehicle_condition": "T"}),
+    "shredding_certificates": ("theft", "theft_db", {
+        "cert_id": "I", "theft_id": "I", "scrap_yard": "T", "shred_date": "T",
+        "certificate_no": "T"}),
+}
+for _name, (_source, _db, _cols) in _P3.items():
+    TABLES[_name] = {"source": _source, "database": _db, "plate_column": None,
+                     "columns": _cols}
+# FK columns added to the Phase 2 hub tables
+TABLES["vehicles"]["columns"].update({"owner_id": "I", "model_id": "I", "dealer_id": "I"})
+TABLES["insurance_policies"]["columns"].update({"customer_id": "I", "agent_id": "I"})
+TABLES["rto_records"]["columns"].update({"office_id": "I"})
+TABLES["theft_records"]["columns"].update({"station_id": "I", "fir_id": "I"})
+
 # Which columns get fuzzy matching, and how (same map the sources use):
 #   plate = OCR-aware plate matcher     code = OCR-aware edit distance
 #   name  = token-based (any word order, partial names)    text = general text
 # Dates, ids and amounts are always matched exactly.
 FUZZY_COLUMNS: dict[str, dict[str, str]] = {
-    table: COLUMN_KINDS.get(spec["source"], {}) for table, spec in TABLES.items()
+    table: TABLE_KINDS.get(table, {}) for table in TABLES
 }
 
 PLATE_KEY = "plate_key"  # virtual column: normalised plate, same rule as mediator.py
@@ -260,11 +329,14 @@ def _apply_fuzzy(tree: exp.Expression, refs: list[exp.Table],
             cands = [tn] if tn else []
         else:
             cands = [n for n in names
-                     if cn in TABLES[n]["columns"] or cn == PLATE_KEY]
+                     if cn in TABLES[n]["columns"]
+                     or (cn == PLATE_KEY and TABLES[n]["plate_column"])]
         if len(cands) != 1:
             return None
         tn = cands[0]
         if cn == PLATE_KEY:
+            if not TABLES[tn]["plate_column"]:
+                return None
             return tn, TABLES[tn]["plate_column"], "plate"
         kind = FUZZY_COLUMNS.get(tn, {}).get(cn)
         return (tn, cn, kind) if kind else None
@@ -308,13 +380,18 @@ def _apply_fuzzy(tree: exp.Expression, refs: list[exp.Table],
         for lit in literals:
             try:
                 res = similar_fn(spec["source"], real_col, lit,
-                                 limit=FUZZY_MAX_MATCHES)
+                                 limit=FUZZY_MAX_MATCHES, table=tn)
             except Exception as exc:
                 raise QueryError(
                     f"Fuzzy matching needs {spec['source']} "
                     f"({spec['database']}), which failed: {exc}")
             scanned = max(scanned, int(res.get("candidates_scanned") or 0))
             via = res.get("via") or via
+            found = res.get("matches") or []
+            best = max((m["score"] for m in found), default=0.0)
+            if best >= FUZZY_STRONG:
+                found = [m for m in found if m["score"] >= best - FUZZY_RELATIVE_MARGIN]
+            res = dict(res, matches=found)
             per_literal.append({
                 "query": lit, "exact": bool(res.get("exact")),
                 "low_confidence": bool(res.get("low_confidence")),
@@ -398,11 +475,13 @@ def _build_fragments(tree: exp.Expression, refs: list[exp.Table]) -> dict[str, d
             alias = t.alias_or_name.lower()
             if alias in unsafe:
                 continue
-            my_cols = set(TABLES[name]["columns"]) | {PLATE_KEY}
+            my_cols = set(TABLES[name]["columns"]) | (
+                {PLATE_KEY} if TABLES[name]["plate_column"] else set())
             other_cols: set[str] = set()
             for other in names:
                 if other != name:
-                    other_cols |= set(TABLES[other]["columns"]) | {PLATE_KEY}
+                    other_cols |= set(TABLES[other]["columns"]) | (
+                        {PLATE_KEY} if TABLES[other]["plate_column"] else set())
 
             for c in conjuncts:
                 if any(isinstance(n, (exp.Subquery, exp.Select, exp.Exists))
@@ -431,7 +510,8 @@ def _build_fragments(tree: exp.Expression, refs: list[exp.Table]) -> dict[str, d
             cols = list(spec["columns"])
         else:
             cols = [c for c in spec["columns"] if c in mentioned]
-            if PLATE_KEY in mentioned and spec["plate_column"] not in cols:
+            if (PLATE_KEY in mentioned and spec["plate_column"]
+                    and spec["plate_column"] not in cols):
                 cols.append(spec["plate_column"])
             if not cols:
                 cols = ["id"]  # e.g. COUNT(*): still need one column per row
@@ -614,7 +694,8 @@ def _meta_command(sql: str) -> Optional[dict]:
             raise QueryError(f"Unknown table '{m.group(1)}'. Tables: " + ", ".join(TABLES))
         tmap = {"I": "int", "R": "decimal", "T": "text/date"}
         rows = [[c, tmap[t]] for c, t in TABLES[name]["columns"].items()]
-        rows.append([PLATE_KEY + " (virtual)", "normalised plate, joins across sources"])
+        if TABLES[name]["plate_column"]:
+            rows.append([PLATE_KEY + " (virtual)", "normalised plate, joins across sources"])
         return {"columns": ["column", "type"], "rows": rows}
     return None
 

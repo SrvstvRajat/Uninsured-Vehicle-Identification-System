@@ -1,0 +1,33 @@
+Phase 3 verification — theft_db — 2026-11-20 22:49
+
+Tables (engine, rows):
+  theft_records            InnoDB        32
+  police_stations          InnoDB        28
+  firs                     InnoDB        32
+  recoveries               InnoDB        10
+  shredding_certificates   InnoDB        10
+
+Foreign keys (information_schema.KEY_COLUMN_USAGE):
+  fk_fir_station     firs.station_id -> police_stations.station_id
+  fk_rec_theft       recoveries.theft_id -> theft_records.id
+  fk_shred_theft     shredding_certificates.theft_id -> theft_records.id
+  fk_theft_fir       theft_records.fir_id -> firs.fir_id
+  fk_theft_station   theft_records.station_id -> police_stations.station_id
+  total: 5
+
+Orphan checks (must all be 0):
+  total orphans: 0
+
+Multi-table JOIN (entity information distributed over 5 tables):
+  DL03AC2946 | recovered | 2025-09-07 | FIR/DEL04/2025/0001 | Arjun Kapoor | Dwarka Police Station | 2025-11-04 | None
+  DL03AC7869 | shredded | 2024-12-24 | FIR/DEL01/2024/0002 | Simran Patel | Karol Bagh Police Station | None | SHR202500005
+  DL09AI9539 | stolen | 2026-07-29 | FIR/DEL08/2026/0003 | Simran Mishra | Connaught Place Police Station | None | None
+  DL04AD8829 | stolen | 2026-07-03 | FIR/DEL08/2026/0002 | Rohit Malhotra | Connaught Place Police Station | None | None
+  DL01AA8392 | shredded | 2023-08-28 | FIR/DEL03/2023/0001 | Anjali Chopra | Rohini Police Station | None | SHR202300001
+  DL01AA1267 | stolen | 2026-08-02 | FIR/DEL06/2026/0002 | Kavya Kapoor | Model Town Police Station | None | None
+
+Recovered vehicles (theft_records -> recoveries):
+  DL05AE0135 | 2023-08-11 | 2023-08-31 | Panipat, near an industrial area | damaged front bumper
+  DL08AH8104 | 2023-10-27 | 2024-01-12 | Delhi, in a multi-level parking | intact
+  DL10AJ7647 | 2024-03-18 | 2024-04-08 | Delhi, in a multi-level parking | partially stripped
+  DL10AJ8567 | 2024-03-29 | 2024-06-03 | Meerut, on the highway service road | intact

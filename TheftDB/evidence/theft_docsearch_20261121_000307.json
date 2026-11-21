@@ -1,0 +1,26 @@
+{
+  "request": {
+    "identifiers": {},
+    "keywords": [
+      "stolen",
+      "recovered"
+    ],
+    "places": [],
+    "k": 5
+  },
+  "response": {
+    "source": "theft",
+    "docs": [],
+    "stats": {
+      "chunks": 77,
+      "accepted": 0,
+      "returned": 0,
+      "semantic": false,
+      "weights": {
+        "entity": 0.45,
+        "bm25": 0.2
+      },
+      "elapsed_ms": 1.9
+    }
+  }
+}

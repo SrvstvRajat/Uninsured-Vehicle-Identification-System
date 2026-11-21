@@ -1,0 +1,11 @@
+recovery_id,theft_id,recovery_date,location,vehicle_condition
+1,9,2023-08-31,"Panipat, near an industrial area",damaged front bumper
+2,25,2024-01-12,"Delhi, in a multi-level parking",intact
+3,14,2024-04-08,"Delhi, in a multi-level parking",partially stripped
+4,16,2024-06-03,"Meerut, on the highway service road",intact
+5,28,2024-11-27,"Mathura, behind a market",stereo and battery missing
+6,13,2025-03-02,"Delhi, in an abandoned plot",number plates removed
+7,10,2025-08-01,"Delhi, near an industrial area",partially stripped
+8,1,2025-11-04,"Delhi, behind a market",number plates removed
+9,23,2026-01-03,"Bulandshahr, on the highway service road",intact
+10,27,2026-07-06,"Delhi, in a multi-level parking",damaged front bumper

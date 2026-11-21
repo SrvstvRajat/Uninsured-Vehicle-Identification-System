@@ -14,13 +14,14 @@ FONT_LINKS = Markup(
 
 NAV_ITEMS = (
     ("lookup", "/", "Vehicle lookup"),
+    ("context", "/context", "Context search"),
     ("sql", "/sql", "SQL console"),
     ("cleaning", "/cleaning", "Data cleaning"),
 )
 
 
 def appbar(active=""):
-    """Top navigation bar; `active` is one of lookup / sql / cleaning."""
+    """Top navigation bar; `active` is one of lookup / context / sql / cleaning."""
     links = "".join(
         '<a href="%s"%s>%s</a>' % (
             href, ' aria-current="page"' if key == active else "", escape(label))

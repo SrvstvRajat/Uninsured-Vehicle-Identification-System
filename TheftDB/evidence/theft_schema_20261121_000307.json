@@ -1,0 +1,186 @@
+{
+  "source": "theft",
+  "database": "theft_db",
+  "hub_table": "theft_records",
+  "tables": {
+    "firs": [
+      {
+        "name": "fir_id",
+        "type": "int"
+      },
+      {
+        "name": "fir_no",
+        "type": "varchar"
+      },
+      {
+        "name": "station_id",
+        "type": "int"
+      },
+      {
+        "name": "filed_on",
+        "type": "date"
+      },
+      {
+        "name": "complainant_name",
+        "type": "varchar"
+      },
+      {
+        "name": "complainant_phone",
+        "type": "varchar"
+      }
+    ],
+    "police_stations": [
+      {
+        "name": "station_id",
+        "type": "int"
+      },
+      {
+        "name": "station_code",
+        "type": "varchar"
+      },
+      {
+        "name": "station_name",
+        "type": "varchar"
+      },
+      {
+        "name": "city",
+        "type": "varchar"
+      },
+      {
+        "name": "phone",
+        "type": "varchar"
+      }
+    ],
+    "recoveries": [
+      {
+        "name": "recovery_id",
+        "type": "int"
+      },
+      {
+        "name": "theft_id",
+        "type": "int"
+      },
+      {
+        "name": "recovery_date",
+        "type": "date"
+      },
+      {
+        "name": "location",
+        "type": "varchar"
+      },
+      {
+        "name": "vehicle_condition",
+        "type": "varchar"
+      }
+    ],
+    "shredding_certificates": [
+      {
+        "name": "cert_id",
+        "type": "int"
+      },
+      {
+        "name": "theft_id",
+        "type": "int"
+      },
+      {
+        "name": "scrap_yard",
+        "type": "varchar"
+      },
+      {
+        "name": "shred_date",
+        "type": "date"
+      },
+      {
+        "name": "certificate_no",
+        "type": "varchar"
+      }
+    ],
+    "theft_records": [
+      {
+        "name": "id",
+        "type": "int"
+      },
+      {
+        "name": "plate_no",
+        "type": "varchar"
+      },
+      {
+        "name": "theft_date",
+        "type": "date"
+      },
+      {
+        "name": "status",
+        "type": "enum"
+      },
+      {
+        "name": "shredded_date",
+        "type": "date"
+      },
+      {
+        "name": "station_id",
+        "type": "int"
+      },
+      {
+        "name": "fir_id",
+        "type": "int"
+      }
+    ]
+  },
+  "primary_keys": {
+    "firs": "fir_id",
+    "police_stations": "station_id",
+    "recoveries": "recovery_id",
+    "shredding_certificates": "cert_id",
+    "theft_records": "id"
+  },
+  "fk_graph": [
+    {
+      "child": "firs.station_id",
+      "parent": "police_stations.station_id",
+      "name": "fk_fir_station"
+    },
+    {
+      "child": "recoveries.theft_id",
+      "parent": "theft_records.id",
+      "name": "fk_rec_theft"
+    },
+    {
+      "child": "shredding_certificates.theft_id",
+      "parent": "theft_records.id",
+      "name": "fk_shred_theft"
+    },
+    {
+      "child": "theft_records.fir_id",
+      "parent": "firs.fir_id",
+      "name": "fk_theft_fir"
+    },
+    {
+      "child": "theft_records.station_id",
+      "parent": "police_stations.station_id",
+      "name": "fk_theft_station"
+    }
+  ],
+  "similar_columns": {
+    "theft_records": {
+      "plate_no": "plate",
+      "status": "text"
+    },
+    "firs": {
+      "fir_no": "code",
+      "complainant_name": "name",
+      "complainant_phone": "code"
+    },
+    "police_stations": {
+      "station_name": "text",
+      "city": "text"
+    },
+    "recoveries": {
+      "location": "text"
+    }
+  },
+  "documents": {
+    "indexed_chunks": 77,
+    "semantic": false,
+    "index_dir": "unstructured/index"
+  }
+}

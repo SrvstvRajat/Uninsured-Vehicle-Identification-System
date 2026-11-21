@@ -1,0 +1,63 @@
+{
+  "request": {
+    "seeds": [
+      {
+        "table": "theft_records",
+        "column": "plate_no",
+        "values": [
+          "A_PLATE"
+        ]
+      }
+    ],
+    "match": "exact",
+    "query_terms": [
+      "stolen",
+      "recovered"
+    ],
+    "max_depth": 2
+  },
+  "response": {
+    "source": "theft",
+    "database": "theft_db",
+    "intents": [
+      "theft"
+    ],
+    "fk_graph": [
+      {
+        "child": "firs.station_id",
+        "parent": "police_stations.station_id",
+        "name": "fk_fir_station"
+      },
+      {
+        "child": "recoveries.theft_id",
+        "parent": "theft_records.id",
+        "name": "fk_rec_theft"
+      },
+      {
+        "child": "shredding_certificates.theft_id",
+        "parent": "theft_records.id",
+        "name": "fk_shred_theft"
+      },
+      {
+        "child": "theft_records.fir_id",
+        "parent": "firs.fir_id",
+        "name": "fk_theft_fir"
+      },
+      {
+        "child": "theft_records.station_id",
+        "parent": "police_stations.station_id",
+        "name": "fk_theft_station"
+      }
+    ],
+    "nodes": [],
+    "edges": [],
+    "identifiers": {},
+    "stats": {
+      "rows_examined": 0,
+      "rows_returned": 0,
+      "pruned": 0,
+      "per_table": {},
+      "elapsed_ms": 7.5
+    }
+  }
+}

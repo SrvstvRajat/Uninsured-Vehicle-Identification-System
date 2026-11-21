@@ -1,0 +1,29 @@
+station_id,station_code,station_name,city,phone
+1,DEL01,Karol Bagh Police Station,Delhi,7167696004
+2,DEL02,Lajpat Nagar Police Station,Delhi,7793969994
+3,DEL03,Rohini Police Station,Delhi,8096065187
+4,DEL04,Dwarka Police Station,Delhi,7106643936
+5,DEL05,Saket Police Station,Delhi,6351669114
+6,DEL06,Model Town Police Station,Delhi,7302200215
+7,DEL07,Mayur Vihar Police Station,Delhi,7454849278
+8,DEL08,Connaught Place Police Station,Delhi,6092741930
+9,GHA01,Kavi Nagar Police Station,Ghaziabad,6310670484
+10,GHA02,Indirapuram Police Station,Ghaziabad,8079863338
+11,GHA03,Vijay Nagar Police Station,Ghaziabad,6047400841
+12,GHA04,Sihani Gate Police Station,Ghaziabad,6493226231
+13,NOI01,Sector 20 Police Station,Noida,7219127715
+14,NOI02,Sector 39 Police Station,Noida,9468875247
+15,NOI03,Sector 58 Police Station,Noida,6505544971
+16,GUR01,DLF Phase 1 Police Station,Gurugram,7335898988
+17,GUR02,Sector 29 Police Station,Gurugram,9674000799
+18,GUR03,Sohna Road Police Station,Gurugram,9193182737
+19,FAR01,Sector 31 Police Station,Faridabad,8788739749
+20,FAR02,NIT Police Station,Faridabad,6153569607
+21,MEE01,Civil Lines Police Station,Meerut,9861725004
+22,MEE02,Partapur Police Station,Meerut,8684086371
+23,LUC01,Hazratganj Police Station,Lucknow,6286186519
+24,LUC02,Gomti Nagar Police Station,Lucknow,6579868526
+25,JAI01,Malviya Nagar Police Station,Jaipur,7166450329
+26,JAI02,Vaishali Nagar Police Station,Jaipur,9414804983
+27,CHA01,Sector 17 Police Station,Chandigarh,9848657441
+28,CHA02,Sector 34 Police Station,Chandigarh,9165251844
